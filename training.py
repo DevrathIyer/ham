@@ -34,10 +34,10 @@ class TrainConfig:
     checkpoint_dir: str = "./checkpoints"
     checkpoint_every: int = 5
     log_every: int = 100
-    # Temperature annealing parameters
-    temp_start: float | None = None  # Starting temperature (if None, use model default)
-    temp_end: float | None = None    # Ending temperature (if None, use model default)
-    temp_anneal_steps: int | None = None  # Number of steps to anneal over (if None, anneal over all epochs)
+    # Temperature annealing parameters (both must be set to enable annealing)
+    temp_start: float | None = None  # Starting temperature (e.g., 0.1 for soft attention)
+    temp_end: float | None = None    # Ending temperature (e.g., 0.001 for sharp attention)
+    temp_anneal_steps: int | None = None  # Number of steps to anneal over (if None, uses all epochs)
 
 
 def compute_annealed_temperature(
@@ -119,15 +119,38 @@ class Trainer:
         self.checkpoint_dir = Path(self.config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Check if model supports temperature parameter
-        # HNM models have this, others don't
-        try:
-            # Try to import HNM to use isinstance
-            from models import HNM
-            self.is_hnm = isinstance(model, HNM)
-        except ImportError:
-            # Fallback to checking class name if import fails
-            self.is_hnm = model.__class__.__name__ == 'HNM'
+        # Check if model supports temperature parameter (HNM models do)
+        from models import HNM
+        self.is_hnm = isinstance(model, HNM)
+    
+    def _compute_logits(
+        self, 
+        model: eqx.Module, 
+        x: jax.Array, 
+        keys: jax.Array, 
+        hard: bool = False, 
+        temperature: float | None = None
+    ) -> jax.Array:
+        """Compute logits from model, handling different model types.
+        
+        Args:
+            model: Model to compute logits from
+            x: Input batch (N, ...)
+            keys: Random keys for each sample (N,)
+            hard: Whether to use hard attention (HNM only)
+            temperature: Temperature override (HNM only)
+            
+        Returns:
+            Logits (N, num_classes)
+        """
+        if self.is_hnm:
+            # HNM models: (x, key, hard, temperature)
+            # vmap over samples: in_axes=(0, 0, None, None)
+            return jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, temperature)
+        else:
+            # Other models: (x, key)
+            # vmap over samples: in_axes=(0, 0)
+            return jax.vmap(model)(x, key=keys)
 
     @eqx.filter_jit
     def _train_step(
@@ -164,7 +187,7 @@ class Trainer:
         dummy_key = jax.random.PRNGKey(0)
         keys = jax.random.split(dummy_key, x.shape[0])
         # Use None for temperature to get consistent evaluation with model defaults
-        logits = jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, None)
+        logits = self._compute_logits(model, x, keys, hard, None)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
         preds = jnp.argmax(logits, axis=-1)
         acc = jnp.mean(preds == y)
@@ -234,15 +257,8 @@ class Trainer:
                 dummy_key = jax.random.PRNGKey(0)
                 batch_keys = jax.random.split(dummy_key, x_batch.shape[0])
                 
-                # Call model differently based on whether it's HNM or not
-                if self.is_hnm:
-                    # Use None for temperature to get consistent accuracy metrics
-                    logits = jax.vmap(inference_model, in_axes=(0, 0, None, None))(
-                        x_batch, batch_keys, False, None
-                    )
-                else:
-                    logits = jax.vmap(inference_model)(x_batch, key=batch_keys)
-                
+                # Use helper to compute logits with consistent calling convention
+                logits = self._compute_logits(inference_model, x_batch, batch_keys, False, None)
                 preds = jnp.argmax(logits, axis=-1)
                 acc = jnp.mean(preds == y_batch)
 
