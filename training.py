@@ -148,9 +148,9 @@ class Trainer:
             # Vmap over batch: in_axes=(0, 0, None, None) for (x, keys, hard, temp)
             return jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, temperature)
         else:
-            # Other model signature per sample: model(x, key=key)
-            # Vmap over batch: in_axes=(0, 0) for (x, keys)
-            return jax.vmap(model)(x, key=keys)
+            # Other models signature per sample: model(x, *, key=key)
+            # Vmap over batch with keyword argument for key
+            return jax.vmap(lambda x, k: model(x, key=k))(x, keys)
 
     @eqx.filter_jit
     def _train_step(
@@ -187,7 +187,7 @@ class Trainer:
         dummy_key = jax.random.PRNGKey(0)
         keys = jax.random.split(dummy_key, x.shape[0])
         # Use None for temperature to get consistent evaluation with model defaults
-        logits = self._compute_logits(model, x, keys, hard, None)
+        logits = self._compute_logits(model, x, keys, hard=hard, temperature=None)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
         preds = jnp.argmax(logits, axis=-1)
         acc = jnp.mean(preds == y)
@@ -258,7 +258,7 @@ class Trainer:
                 batch_keys = jax.random.split(dummy_key, x_batch.shape[0])
                 
                 # Use helper to compute logits with consistent calling convention
-                logits = self._compute_logits(inference_model, x_batch, batch_keys, False, None)
+                logits = self._compute_logits(inference_model, x_batch, batch_keys, hard=False, temperature=None)
                 preds = jnp.argmax(logits, axis=-1)
                 acc = jnp.mean(preds == y_batch)
 
