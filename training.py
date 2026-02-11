@@ -101,13 +101,14 @@ class Trainer:
         model: eqx.Module,
         x: jax.Array,
         y: jax.Array,
+        hard=False,
     ) -> tuple[jax.Array, jax.Array]:
         """Evaluation step returning loss and accuracy (inference mode, no dropout)."""
         model = eqx.nn.inference_mode(model)
         # Use a dummy key since inference_mode disables dropout
         dummy_key = jax.random.PRNGKey(0)
         keys = jax.random.split(dummy_key, x.shape[0])
-        logits = jax.vmap(model)(x, key=keys)
+        logits = jax.vmap(model, in_axes=(0, 0, None))(x, keys, hard)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
         preds = jnp.argmax(logits, axis=-1)
         acc = jnp.mean(preds == y)
@@ -180,7 +181,9 @@ class Trainer:
                     f"val_loss={val_loss:.4f}, val_acc={val_acc:.4f}"
                 )
             else:
-                print(f"Epoch {epoch + 1}: train_loss={avg_loss:.4f}, train_acc={avg_acc:.4f}")
+                print(
+                    f"Epoch {epoch + 1}: train_loss={avg_loss:.4f}, train_acc={avg_acc:.4f}"
+                )
 
             # Checkpoint
             if (epoch + 1) % self.config.checkpoint_every == 0:
@@ -188,7 +191,9 @@ class Trainer:
 
         return self.model
 
-    def evaluate(self, data: tuple[jax.Array, jax.Array]) -> tuple[float, float]:
+    def evaluate(
+        self, data: tuple[jax.Array, jax.Array], **kwargs
+    ) -> tuple[float, float]:
         """Evaluate model on data.
 
         Args:
@@ -205,7 +210,7 @@ class Trainer:
         n_batches = 0
 
         for x_batch, y_batch in loader:
-            loss, acc = self._eval_step(self.model, x_batch, y_batch)
+            loss, acc = self._eval_step(self.model, x_batch, y_batch, **kwargs)
             total_loss += float(loss)
             total_acc += float(acc)
             n_batches += 1

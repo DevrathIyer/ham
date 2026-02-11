@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 
 from data import (DataLoader, get_cifar10_data, get_fashion_mnist_data,
                   get_mnist_data, get_regression_data, get_synthetic_data)
-from hopfield import convert_hcm_to_hopfield, convert_hnm_to_hopfield
-from models import CNN, HCM, HNM, MLP, count_parameters
+from hopfield import convert_hnm_to_hopfield
+from models import CNN, HNL, HNM, MLP, count_parameters
 from training import TrainConfig, Trainer, cross_entropy_loss, mse_loss
 from visualization import (plot_confusion_matrix, plot_hnm_mem_weights,
                            plot_image_predictions, plot_synthetic_data_2d,
@@ -116,63 +116,37 @@ def create_model(
     key: jax.Array,
     flatten: bool = False,
 ) -> tuple:
-    """Create a model based on type and dataset config.
-
-    Args:
-        model_type: 'mlp' or 'cnn'
-        config: Dataset configuration
-        key: Random key for initialization
-        flatten: Whether inputs will be flattened
-
-    Returns:
-        model instance
-    """
     if model_type == "mlp":
         if config.is_image:
-            in_features = 1
+            in_feats = 1
             for dim in config.input_shape:
-                in_features *= dim
+                in_feats *= dim
         else:
-            in_features = config.input_shape[0]
+            in_feats = config.input_shape[0]
 
-        out_features = config.num_classes if not config.is_regression else 1
+        out_feats = config.num_classes if not config.is_regression else 1
 
         # Scale hidden layers based on input size
-        if in_features > 1000:
+        if in_feats > 1000:
             hidden_dims = [256, 128]
-        elif in_features > 100:
+        elif in_feats > 100:
             hidden_dims = [64, 64]
         else:
             hidden_dims = [32, 16]
 
-        return MLP.create(in_features, hidden_dims, out_features, key=key)
+        return MLP.create(in_feats, hidden_dims, out_feats, key=key)
 
     elif model_type == "hnm":
-        if config.is_image:
-            in_features = 1
-            for dim in config.input_shape:
-                in_features *= dim
-        else:
-            in_features = config.input_shape[0]
+        layers = []
 
-        out_features = config.num_classes if not config.is_regression else 1
+        l1_key, l2_key, l3_key = jax.random.split(key, 3)
+        mems = 16
+        temp = 2e-2
+        layers.append(HNL(784, 64, mems, 4, key=l1_key, temp=temp / mems))
+        # layers.append(HNL(64, 64, mems, 4, key=l2_key, temp=temp / mems))
+        layers.append(HNL(64, 64, 10, 1, key=l3_key, temp=temp / 10))
 
-        # Select architecture based on input dimension
-        if in_features > 1000:
-            hidden_dims, memories = [256, 128], 16
-        elif in_features > 100:
-            hidden_dims, memories = [128, 64], 16
-        else:
-            hidden_dims, memories = [64, 32], 4
-
-        return HNM.create(
-            in_features,
-            hidden_dims,
-            out_features,
-            num_heads=8,
-            num_memories=memories,
-            key=key,
-        )
+        return HNM(layers)
 
     elif model_type == "cnn":
         if not config.is_image:
@@ -184,20 +158,6 @@ def create_model(
             in_channels=config.input_shape[0],
             num_classes=config.num_classes,
             image_size=config.input_shape[1],
-            key=key,
-        )
-
-    elif model_type == "hcm":
-        if not config.is_image:
-            raise ValueError(
-                f"HCM requires image data, but {config.name} is not an image dataset"
-            )
-
-        return HCM.create(
-            in_channels=config.input_shape[0],
-            num_classes=config.num_classes,
-            image_size=config.input_shape[1],
-            num_memories=8,
             key=key,
         )
 
@@ -216,19 +176,6 @@ def train(
     hopfield_iterations: int = 5,
     hopfield_binary_dim: int | None = None,
 ) -> None:
-    """Train a model on a dataset.
-
-    Args:
-        dataset: Dataset name
-        model_type: Model architecture ('mlp' or 'cnn')
-        seed: Random seed
-        epochs: Number of training epochs
-        batch_size: Batch size
-        learning_rate: Learning rate
-        convert_to_hopfield: Whether to convert to binary Hopfield after training
-        hopfield_iterations: Number of Hopfield iterations
-        hopfield_binary_dim: Binary dimension for Hopfield projection
-    """
     config = DATASET_CONFIGS[dataset]
 
     print("=" * 60)
@@ -277,6 +224,10 @@ def train(
     test_loss, test_acc = trainer.evaluate((X_test, y_test))
     print(f"\nFinal Test Accuracy (Soft Attention): {test_acc:.4f}")
 
+    # Evaluate
+    test_loss, test_acc = trainer.evaluate((X_test, y_test), hard=True)
+    print(f"\nFinal Test Accuracy (Hard Attention): {test_acc:.4f}")
+
     # Convert to Hopfield if requested
     if convert_to_hopfield and model_type in ("hnm", "hcm"):
         print("\n" + "=" * 60)
@@ -285,13 +236,6 @@ def train(
 
         if model_type == "hnm":
             hopfield_model = convert_hnm_to_hopfield(
-                trained_model,
-                hopfield_key,
-                binary_dim=hopfield_binary_dim,
-                num_iterations=hopfield_iterations,
-            )
-        else:  # hcm
-            hopfield_model = convert_hcm_to_hopfield(
                 trained_model,
                 hopfield_key,
                 binary_dim=hopfield_binary_dim,
