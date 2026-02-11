@@ -13,7 +13,8 @@ from data import (DataLoader, get_cifar10_data, get_fashion_mnist_data,
                   get_mnist_data, get_regression_data, get_synthetic_data)
 from hopfield import convert_hnm_to_hopfield
 from models import CNN, HNL, HNM, MLP, count_parameters
-from training import TrainConfig, Trainer, cross_entropy_loss, mse_loss, hnm_cross_entropy_loss
+from training import (TrainConfig, Trainer, cross_entropy_loss,
+                      hnm_cross_entropy_loss, mse_loss)
 from visualization import (plot_confusion_matrix, plot_hnm_mem_weights,
                            plot_image_predictions, plot_synthetic_data_2d,
                            plot_training_history)
@@ -208,7 +209,7 @@ def train(
         # Start with higher temperature for soft attention (better gradients)
         # End with lower temperature approaching hard attention
         temp_start = 0.1  # Higher temperature = softer attention
-        temp_end = 1e-3   # Lower temperature = sharp attention
+        temp_end = 1e-3  # Lower temperature = sharp attention
     else:
         loss_fn = cross_entropy_loss
         temp_start = None
