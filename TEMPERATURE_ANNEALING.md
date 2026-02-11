@@ -50,7 +50,7 @@ def compute_annealed_temperature(step, total_steps, temp_start, temp_end, schedu
 Added annealing configuration:
 - `temp_start`: Starting temperature (e.g., 0.1)
 - `temp_end`: Ending temperature (e.g., 0.001)
-- `temp_anneal_steps`: Number of steps to anneal over
+- `temp_anneal_steps`: Number of steps to anneal over (if None, uses all training steps)
 
 #### Training Loop
 - Computes current temperature at each training step
@@ -88,7 +88,7 @@ To customize annealing parameters, modify `main.py`:
 train_config = TrainConfig(
     temp_start=0.2,      # Higher starting temperature
     temp_end=0.01,       # Higher ending temperature
-    temp_anneal_steps=5000,  # Anneal over 5000 steps instead of all epochs
+    temp_anneal_steps=5000,  # Anneal over 5000 steps instead of all training steps
 )
 ```
 

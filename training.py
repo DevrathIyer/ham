@@ -136,7 +136,7 @@ class Trainer:
         Args:
             model: Model to compute logits from
             x: Input batch (N, ...)
-            keys: Random keys for each sample (N,)
+            keys: Random keys for each sample (N,) - vmapped over
             hard: Whether to use hard attention (HNM only)
             temperature: Temperature override (HNM only)
             
@@ -144,12 +144,12 @@ class Trainer:
             Logits (N, num_classes)
         """
         if self.is_hnm:
-            # HNM models: (x, key, hard, temperature)
-            # vmap over samples: in_axes=(0, 0, None, None)
+            # HNM model signature per sample: model(x, key, hard, temperature)
+            # Vmap over batch: in_axes=(0, 0, None, None) for (x, keys, hard, temp)
             return jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, temperature)
         else:
-            # Other models: (x, key)
-            # vmap over samples: in_axes=(0, 0)
+            # Other model signature per sample: model(x, key=key)
+            # Vmap over batch: in_axes=(0, 0) for (x, keys)
             return jax.vmap(model)(x, key=keys)
 
     @eqx.filter_jit
