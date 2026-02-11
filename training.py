@@ -119,6 +119,19 @@ class Trainer:
         self.checkpoint_dir = Path(self.config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
+        # Validate temperature annealing configuration
+        if (self.config.temp_start is None) != (self.config.temp_end is None):
+            raise ValueError(
+                "Both temp_start and temp_end must be set together to enable annealing, "
+                "or both must be None to disable it."
+            )
+        if (self.config.temp_start is not None and self.config.temp_end is not None and
+            self.config.temp_start <= self.config.temp_end):
+            raise ValueError(
+                f"temp_start ({self.config.temp_start}) must be greater than "
+                f"temp_end ({self.config.temp_end}) for annealing to work."
+            )
+        
         # Check if model supports temperature parameter (HNM models do)
         from models import HNM
         self.is_hnm = isinstance(model, HNM)
@@ -145,7 +158,11 @@ class Trainer:
         """
         if self.is_hnm:
             # HNM model signature per sample: model(x, key, hard, temperature)
-            # Vmap over batch: in_axes=(0, 0, None, None) for (x, keys, hard, temp)
+            # Vmap over batch with axes (0, 0, None, None) means:
+            #   - x: vmap over axis 0 (batch dimension)
+            #   - keys: vmap over axis 0 (one key per sample)
+            #   - hard: None (same for all samples)
+            #   - temperature: None (same for all samples)
             return jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, temperature)
         else:
             # Other models signature per sample: model(x, *, key=key)

@@ -208,7 +208,7 @@ def train(
         # Start with higher temperature for soft attention (better gradients)
         # End with lower temperature approaching hard attention
         temp_start = 0.1  # Higher temperature = softer attention
-        temp_end = 1e-3   # Lower temperature = sharper attention
+        temp_end = 1e-3   # Lower temperature = sharp attention
     else:
         loss_fn = cross_entropy_loss
         temp_start = None
