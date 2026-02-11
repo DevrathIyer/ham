@@ -11,19 +11,6 @@ from models import (HCL, HCM, HNL, HNM, HopfieldHCL, HopfieldHCM, HopfieldHNL,
                     HopfieldHNM)
 
 
-def create_binary_projection(
-    key: jax.Array, input_dim: int, binary_dim: int
-) -> jax.Array:
-    # Random binary matrix scaled for variance preservation
-    proj = jax.random.normal(key, (binary_dim, input_dim))
-    proj = proj / jnp.linalg.norm(proj)  # Scale for variance preservation
-    return proj  #
-
-
-def binarize_memories(memories: jax.Array) -> jax.Array:
-    return jnp.sign(memories)
-
-
 def compute_hopfield_weights(binary_memories: jax.Array) -> jax.Array:
     """Compute Hopfield weight matrix using Hebbian learning.
 
@@ -77,7 +64,7 @@ def hopfield_iterate(
 def convert_hnl_to_hopfield(
     hnl: HNL,
     key: jax.Array,
-    binary_dim: int | None = None,
+    binary_dim: int,
     num_iterations: int = 5,
 ) -> HopfieldHNL:
     """Convert a trained HNL layer to a binary Hopfield layer.
@@ -91,30 +78,48 @@ def convert_hnl_to_hopfield(
     Returns:
         HopfieldHNL layer with binary dynamics
     """
-
-    if binary_dim is None:
-        binary_dim = hnl.num_memories
-
+    print(binary_dim)
     # Create binary projection for each head: (num_heads, binary_dim, head_dim)
     keys = jax.random.split(key, hnl.num_heads)
-    bin_proj = jnp.stack(
-        [create_binary_projection(k, hnl.head_dim, binary_dim) for k in keys]
-    )
+    bin_proj = [
+        jnp.linalg.qr(jax.random.normal(key, (binary_dim, hnl.head_dim)))[0]
+        for key in keys
+    ]
+
+    bin_inv = jnp.stack([proj.T for proj in bin_proj])
+    bin_proj = jnp.stack(bin_proj)
+
+    print(bin_proj.shape)
+    print(bin_inv.shape)
 
     # Binarize memories and project to binary space
     # memories: (num_heads, num_memories, head_dim)
-    binary_memories = binarize_memories(hnl.memories)
+    # binary_memories = binarize_memories(hnl.memories)
+    binary_memories = hnl.memories
 
     # Project each memory through bin_proj to get patterns in binary_dim space
     # For each head: (num_memories, head_dim) @ (binary_dim, head_dim).T -> (num_memories, binary_dim)
     # Then binarize the projected patterns
     def compute_weights_for_head(bin_proj_h, mem_h):
-        # Project memories to binary space: (num_memories, head_dim) @ (head_dim, binary_dim)
+        # mem_h = mem_h / jnp.linalg.norm(mem_h, axis=-1, keepdims=True)
         binary_patterns = jnp.sign(mem_h @ bin_proj_h.T)  # (num_memories, binary_dim)
+
+        """
+        binary_patterns = binary_patterns / jnp.linalg.norm(
+            binary_patterns, axis=-1, keepdims=True
+        )
+        """
         # return compute_hopfield_weights(binary_patterns)
         return binary_patterns
 
     weight_matrix = jax.vmap(compute_weights_for_head)(bin_proj, binary_memories)
+
+    memories = hnl.memories / jnp.linalg.norm(hnl.memories, axis=-1, keepdims=True)
+
+    mem_back = jnp.einsum("hmb,hdb->hmd", weight_matrix, bin_inv)
+    mem_back /= jnp.linalg.norm(mem_back, axis=-1, keepdims=True)
+    err = jnp.mean(jnp.linalg.norm(memories - mem_back, axis=-1))
+    print(err)
 
     return HopfieldHNL(
         in_features=hnl.in_features,
@@ -127,7 +132,9 @@ def convert_hnl_to_hopfield(
         query_proj=hnl.query_proj,
         layer_norm=hnl.layer_norm,
         bin_proj=bin_proj,
+        bin_inv=bin_inv,
         weight_matrix=weight_matrix,
+        memories=hnl.memories,
     )
 
 
@@ -206,7 +213,7 @@ def convert_hcl_to_hopfield(
 def convert_hnm_to_hopfield(
     hnm: HNM,
     key: jax.Array,
-    binary_dim: int | None = None,
+    binary_dim: int,
     num_iterations: int = 5,
 ) -> HopfieldHNM:
     """Convert a trained HNM model to a binary Hopfield model.

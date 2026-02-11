@@ -141,7 +141,7 @@ def create_model(
         if in_features > 1000:
             hidden_dims = [256, 128]
         elif in_features > 100:
-            hidden_dims = [128, 64]
+            hidden_dims = [64, 64]
         else:
             hidden_dims = [32, 16]
 
@@ -161,7 +161,7 @@ def create_model(
         if in_features > 1000:
             hidden_dims, memories = [256, 128], 16
         elif in_features > 100:
-            hidden_dims, memories = [128, 64], 4
+            hidden_dims, memories = [128, 64], 16
         else:
             hidden_dims, memories = [64, 32], 4
 
@@ -169,6 +169,7 @@ def create_model(
             in_features,
             hidden_dims,
             out_features,
+            num_heads=8,
             num_memories=memories,
             key=key,
         )
