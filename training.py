@@ -119,13 +119,8 @@ class Trainer:
         self.checkpoint_dir = Path(self.config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Check if model is HNM (has layers with temperature parameter)
-        self.is_hnm = hasattr(model, 'layers') and hasattr(model, '__call__')
-        if self.is_hnm:
-            # Try to check if the model's __call__ accepts temperature
-            import inspect
-            sig = inspect.signature(model.__call__)
-            self.is_hnm = 'temperature' in sig.parameters
+        # Check if model is HNM by class name (more robust than duck typing)
+        self.is_hnm = model.__class__.__name__ == 'HNM'
 
     @eqx.filter_jit
     def _train_step(
