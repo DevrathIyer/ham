@@ -87,7 +87,7 @@ class HNL(eqx.Module):
         self.layer_norm = eqx.nn.LayerNorm(out_feats)
         self.dropout = eqx.nn.Dropout(dropout_rate)
 
-    def __call__(self, x: jax.Array, hard: bool, key: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, hard: bool, key: jax.Array, temperature: float | None = None) -> jax.Array:
         q = self.query_proj(x)
         q = q.reshape(self.num_heads, self.head_dim)
 
@@ -102,7 +102,9 @@ class HNL(eqx.Module):
             top_mems = jnp.argmax(attn_scores, axis=-1)
             out = self.memories[jnp.arange(self.num_heads), top_mems]
         else:
-            attn_weights = jax.nn.softmax(attn_scores / self.temperature, axis=-1)
+            # Use provided temperature if available, otherwise use default
+            temp = temperature if temperature is not None else self.temperature
+            attn_weights = jax.nn.softmax(attn_scores / temp, axis=-1)
             out = jnp.einsum("hm,hmd->hd", attn_weights, mem_norm)
 
         out = out.reshape(self.out_feats)
@@ -117,10 +119,10 @@ class HNM(eqx.Module):
     def __init__(self, layers: HNL):
         self.layers = layers
 
-    def __call__(self, x: jax.Array, key: jax.Array, hard: bool = False) -> jax.Array:
+    def __call__(self, x: jax.Array, key: jax.Array, hard: bool = False, temperature: float | None = None) -> jax.Array:
         keys = jax.random.split(key, len(self.layers))
         for layer, k in zip(self.layers, keys):
-            x = layer(x, hard, key=k)
+            x = layer(x, hard, key=k, temperature=temperature)
         return x
 
 

@@ -13,7 +13,7 @@ from data import (DataLoader, get_cifar10_data, get_fashion_mnist_data,
                   get_mnist_data, get_regression_data, get_synthetic_data)
 from hopfield import convert_hnm_to_hopfield
 from models import CNN, HNL, HNM, MLP, count_parameters
-from training import TrainConfig, Trainer, cross_entropy_loss, mse_loss
+from training import TrainConfig, Trainer, cross_entropy_loss, mse_loss, hnm_cross_entropy_loss
 from visualization import (plot_confusion_matrix, plot_hnm_mem_weights,
                            plot_image_predictions, plot_synthetic_data_2d,
                            plot_training_history)
@@ -197,8 +197,22 @@ def train(
     model = create_model(model_type, config, model_key, flatten=flatten)
     print(f"Model parameters: {count_parameters(model):,}")
 
-    # Select loss function
-    loss_fn = mse_loss if config.is_regression else cross_entropy_loss
+    # Select loss function and configure temperature annealing
+    if config.is_regression:
+        loss_fn = mse_loss
+        temp_start = None
+        temp_end = None
+    elif model_type == "hnm":
+        loss_fn = hnm_cross_entropy_loss
+        # Temperature annealing for HNM models:
+        # Start with higher temperature for soft attention (better gradients)
+        # End with lower temperature approaching hard attention
+        temp_start = 0.1  # Higher temperature = softer attention
+        temp_end = 1e-3   # Lower temperature = sharper attention
+    else:
+        loss_fn = cross_entropy_loss
+        temp_start = None
+        temp_end = None
 
     # Training config
     train_config = TrainConfig(
@@ -207,6 +221,8 @@ def train(
         batch_size=batch_size,
         checkpoint_dir=f"./checkpoints/{dataset}_{model_type}",
         checkpoint_every=max(1, epochs // 5),
+        temp_start=temp_start,
+        temp_end=temp_end,
     )
 
     # Handle regression separately (custom training loop)
