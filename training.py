@@ -119,8 +119,15 @@ class Trainer:
         self.checkpoint_dir = Path(self.config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Check if model is HNM by class name (more robust than duck typing)
-        self.is_hnm = model.__class__.__name__ == 'HNM'
+        # Check if model supports temperature parameter
+        # HNM models have this, others don't
+        try:
+            # Try to import HNM to use isinstance
+            from models import HNM
+            self.is_hnm = isinstance(model, HNM)
+        except ImportError:
+            # Fallback to checking class name if import fails
+            self.is_hnm = model.__class__.__name__ == 'HNM'
 
     @eqx.filter_jit
     def _train_step(
@@ -147,14 +154,17 @@ class Trainer:
         x: jax.Array,
         y: jax.Array,
         hard=False,
-        temperature: float | None = None,
     ) -> tuple[jax.Array, jax.Array]:
-        """Evaluation step returning loss and accuracy (inference mode, no dropout)."""
+        """Evaluation step returning loss and accuracy (inference mode, no dropout).
+        
+        Note: Uses model's default temperature (no annealing) for consistent evaluation.
+        """
         model = eqx.nn.inference_mode(model)
         # Use a dummy key since inference_mode disables dropout
         dummy_key = jax.random.PRNGKey(0)
         keys = jax.random.split(dummy_key, x.shape[0])
-        logits = jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, temperature)
+        # Use None for temperature to get consistent evaluation with model defaults
+        logits = jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, None)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
         preds = jnp.argmax(logits, axis=-1)
         acc = jnp.mean(preds == y)
@@ -218,15 +228,17 @@ class Trainer:
                     self.model, self.opt_state, x_batch, y_batch, step_key, temperature
                 )
 
-                # Compute accuracy for display (use inference mode)
+                # Compute accuracy for display (use inference mode with default temperature)
+                # Note: We use model's default temperature (not annealed) for consistent metrics
                 inference_model = eqx.nn.inference_mode(self.model)
                 dummy_key = jax.random.PRNGKey(0)
                 batch_keys = jax.random.split(dummy_key, x_batch.shape[0])
                 
                 # Call model differently based on whether it's HNM or not
                 if self.is_hnm:
+                    # Use None for temperature to get consistent accuracy metrics
                     logits = jax.vmap(inference_model, in_axes=(0, 0, None, None))(
-                        x_batch, batch_keys, False, temperature
+                        x_batch, batch_keys, False, None
                     )
                 else:
                     logits = jax.vmap(inference_model)(x_batch, key=batch_keys)
