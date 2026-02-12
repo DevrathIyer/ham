@@ -16,7 +16,9 @@ class MLP(eqx.Module):
         self.layers = layers
         self.activation = activation
 
-    def __call__(self, x: jax.Array, *, key: jax.Array) -> jax.Array:
+    def __call__(
+        self, x: jax.Array, hard: bool, key: jax.Array, temperature: float | None = None
+    ) -> jax.Array:
         for layer in self.layers[:-1]:
             x = self.activation(layer(x))
         return self.layers[-1](x)
@@ -49,7 +51,7 @@ class HNL(eqx.Module):
     num_mems: int
     num_heads: int
     head_dim: int
-    temperature: float
+    is_class: bool
     query_proj: eqx.nn.Linear
     memories: jax.Array
     layer_norm: eqx.nn.LayerNorm
@@ -61,8 +63,8 @@ class HNL(eqx.Module):
         out_feats: int,
         num_mems: int,
         num_heads: int,
+        is_class: bool = False,
         dropout_rate: float = 0.0,
-        temp: float = 1e-2,
         *,
         key: jax.Array,
     ):
@@ -75,8 +77,7 @@ class HNL(eqx.Module):
         self.num_mems = num_mems
         self.num_heads = num_heads
         self.head_dim = out_feats // num_heads
-        self.temperature = temp
-        print(f"N_heads is {self.num_heads}")
+        self.is_class = is_class
 
         k1, k2, k3, k4, k5 = jax.random.split(key, 5)
 
@@ -87,29 +88,32 @@ class HNL(eqx.Module):
         self.layer_norm = eqx.nn.LayerNorm(out_feats)
         self.dropout = eqx.nn.Dropout(dropout_rate)
 
-    def __call__(self, x: jax.Array, hard: bool, key: jax.Array, temperature: float | None = None) -> jax.Array:
+    def __call__(
+        self, x: jax.Array, hard: bool, key: jax.Array, temperature: float | None = None
+    ) -> jax.Array:
         q = self.query_proj(x)
         q = q.reshape(self.num_heads, self.head_dim)
 
         q_norm = q / jnp.linalg.norm(q, axis=-1, keepdims=True)
-        # mem_norm = self.memories / jnp.sum(self.memories, axis=-1, keepdims=True)
         mem_norm = self.memories / jnp.linalg.norm(
             self.memories, axis=-1, keepdims=True
         )
 
         attn_scores = jnp.einsum("hd,hmd->hm", q_norm, mem_norm)
-        if hard:
-            top_mems = jnp.argmax(attn_scores, axis=-1)
-            out = self.memories[jnp.arange(self.num_heads), top_mems]
+        if self.is_class:
+            return attn_scores.flatten() * 10
         else:
-            # Use provided temperature if available, otherwise use default
-            temp = temperature if temperature is not None else self.temperature
-            attn_weights = jax.nn.softmax(attn_scores / temp, axis=-1)
-            out = jnp.einsum("hm,hmd->hd", attn_weights, mem_norm)
-
+            if hard:
+                top_mems = jnp.argmax(attn_scores, axis=-1)
+                mem_probs = jax.nn.one_hot(top_mems, num_classes=self.head_dim, axis=-1)
+            else:
+                mem_probs = jax.nn.softmax(attn_scores / temperature, axis=-1)
+        out = jnp.einsum("hm,hmd->hd", mem_probs, mem_norm) * jnp.sqrt(self.head_dim)
         out = out.reshape(self.out_feats)
-        out = self.layer_norm(out)
-        out = self.dropout(out, key=key)
+
+        # out = self.layer_norm(out)
+        # jax.debug.print("{}", out)
+        # out = self.dropout(out, key=key)
         return out
 
 
@@ -119,7 +123,13 @@ class HNM(eqx.Module):
     def __init__(self, layers: HNL):
         self.layers = layers
 
-    def __call__(self, x: jax.Array, key: jax.Array, hard: bool = False, temperature: float | None = None) -> jax.Array:
+    def __call__(
+        self,
+        x: jax.Array,
+        key: jax.Array,
+        hard: bool = False,
+        temperature: float | None = None,
+    ) -> jax.Array:
         keys = jax.random.split(key, len(self.layers))
         for layer, k in zip(self.layers, keys):
             x = layer(x, hard, key=k, temperature=temperature)

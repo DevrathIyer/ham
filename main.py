@@ -131,7 +131,7 @@ def create_model(
         if in_feats > 1000:
             hidden_dims = [256, 128]
         elif in_feats > 100:
-            hidden_dims = [64, 64]
+            hidden_dims = [256]
         else:
             hidden_dims = [32, 16]
 
@@ -141,11 +141,10 @@ def create_model(
         layers = []
 
         l1_key, l2_key, l3_key = jax.random.split(key, 3)
-        mems = 16
-        temp = 2e-2
-        layers.append(HNL(784, 64, mems, 4, key=l1_key, temp=temp / mems))
-        # layers.append(HNL(64, 64, mems, 4, key=l2_key, temp=temp / mems))
-        layers.append(HNL(64, 64, 10, 1, key=l3_key, temp=temp / 10))
+        mems = 10
+        layers.append(HNL(784, 64, 16, 4, key=l1_key))
+        layers.append(HNL(64, 8, 10, 1, key=l2_key, is_class=True))
+        # layers.append(HNL(256, 64, 10, 1, key=l3_key, temp=temp))
 
         return HNM(layers)
 
@@ -208,10 +207,11 @@ def train(
         # Temperature annealing for HNM models:
         # Start with higher temperature for soft attention (better gradients)
         # End with lower temperature approaching hard attention
-        temp_start = 0.1  # Higher temperature = softer attention
-        temp_end = 1e-3  # Lower temperature = sharp attention
+        temp_start = 1e0  # Higher temperature = softer attention
+        # temp_end = 5e-4  # lower temperature = sharp attention
+        temp_end = 9e-1  # lower temperature = sharp attention
     else:
-        loss_fn = cross_entropy_loss
+        loss_fn = hnm_cross_entropy_loss
         temp_start = None
         temp_end = None
 
@@ -238,7 +238,7 @@ def train(
     trained_model = trainer.train((X_train, y_train), (X_test, y_test), key=train_key)
 
     # Evaluate
-    test_loss, test_acc = trainer.evaluate((X_test, y_test))
+    test_loss, test_acc = trainer.evaluate((X_test, y_test), temperature=temp_end)
     print(f"\nFinal Test Accuracy (Soft Attention): {test_acc:.4f}")
 
     # Evaluate

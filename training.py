@@ -52,37 +52,15 @@ def compute_annealed_temperature(
     temp_start: float,
     temp_end: float,
 ) -> float:
-    """Compute annealed temperature based on training progress.
-
-    Args:
-        step: Current training step
-        total_steps: Total number of training steps for annealing
-        temp_start: Starting temperature (high for soft attention)
-        temp_end: Ending temperature (low for hard attention)
-        schedule: Annealing schedule ('linear', 'cosine', 'exponential')
-
-    Returns:
-        Current temperature value
-    """
     if step >= total_steps:
         return temp_end
 
     progress = step / total_steps
-    return temp_start + (temp_end - temp_start) * progress
-    """
-    if schedule == "linear":
-    elif schedule == "cosine":
-        # Cosine annealing: smooth transition
-        return temp_end + (temp_start - temp_end) * 0.5 * (
-            1 + jnp.cos(jnp.pi * progress)
-        )
-    elif schedule == "exponential":
-        # Exponential decay
-        decay_rate = jnp.log(temp_end / temp_start)
-        return temp_start * jnp.exp(decay_rate * progress)
-    else:
-        raise ValueError(f"Unknown schedule: {schedule}")
-    """
+
+    # return temp_end + (temp_start - temp_end) * 0.5 * (1 + jnp.cos(jnp.pi * progress))
+    # return jnp.array(temp_start + (temp_end - temp_start) * progress, dtype=jnp.float32)
+    decay_rate = jnp.log(temp_end / temp_start)
+    return temp_start * jnp.exp(decay_rate * progress)
 
 
 class Trainer:
@@ -156,32 +134,7 @@ class Trainer:
         hard: bool = False,
         temperature: float | None = None,
     ) -> jax.Array:
-        """Compute logits from model, handling different model types.
-
-        Args:
-            model: Model to compute logits from
-            x: Input batch (N, ...)
-            keys: Random keys for each sample (N,) - vmapped over
-            hard: Whether to use hard attention (HNM only)
-            temperature: Temperature override (HNM only)
-
-        Returns:
-            Logits (N, num_classes)
-        """
-        if self.is_hnm:
-            # HNM model signature per sample: model(x, key, hard, temperature)
-            # Vmap over batch with axes (0, 0, None, None) means:
-            #   - x: vmap over axis 0 (batch dimension)
-            #   - keys: vmap over axis 0 (one key per sample)
-            #   - hard: None (same for all samples)
-            #   - temperature: None (same for all samples)
-            return jax.vmap(model, in_axes=(0, 0, None, None))(
-                x, keys, hard, temperature
-            )
-        else:
-            # Other models signature per sample: model(x, *, key=key)
-            # Vmap over batch with keyword argument for key
-            return jax.vmap(lambda x, k: model(x, key=k))(x, keys)
+        return jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, temperature)
 
     @eqx.filter_jit
     def _train_step(
@@ -209,6 +162,7 @@ class Trainer:
         model: eqx.Module,
         x: jax.Array,
         y: jax.Array,
+        temperature: jax.Array = None,
         hard=False,
     ) -> tuple[jax.Array, jax.Array]:
         """Evaluation step returning loss and accuracy (inference mode, no dropout).
@@ -220,9 +174,13 @@ class Trainer:
         dummy_key = jax.random.PRNGKey(0)
         keys = jax.random.split(dummy_key, x.shape[0])
         # Use None for temperature to get consistent evaluation with model defaults
-        logits = self._compute_logits(model, x, keys, hard=hard, temperature=None)
+        logits = self._compute_logits(
+            model, x, keys, hard=hard, temperature=temperature
+        )
+        print(logits.shape)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
         preds = jnp.argmax(logits, axis=-1)
+        print(preds.shape)
         acc = jnp.mean(preds == y)
         return loss, acc
 
@@ -271,11 +229,13 @@ class Trainer:
             for x_batch, y_batch in pbar:
                 # Compute annealed temperature for this step
                 if use_annealing:
-                    temperature = compute_annealed_temperature(
-                        self.step,
-                        total_anneal_steps,
-                        self.config.temp_start,
-                        self.config.temp_end,
+                    temperature = jnp.array(
+                        compute_annealed_temperature(
+                            self.step,
+                            total_anneal_steps,
+                            self.config.temp_start,
+                            self.config.temp_end,
+                        )
                     )
                 else:
                     temperature = None
@@ -293,8 +253,13 @@ class Trainer:
 
                 # Use helper to compute logits with consistent calling convention
                 logits = self._compute_logits(
-                    inference_model, x_batch, batch_keys, hard=False, temperature=None
+                    inference_model,
+                    x_batch,
+                    batch_keys,
+                    hard=False,
+                    temperature=temperature,
                 )
+                # jax.debug.print("{}, {}", logits[:5], y_batch[:5])
                 preds = jnp.argmax(logits, axis=-1)
                 acc = jnp.mean(preds == y_batch)
 
@@ -305,10 +270,8 @@ class Trainer:
 
                 # Show temperature in progress bar if using annealing
                 postfix = {"loss": f"{loss:.4f}", "acc": f"{acc:.4f}"}
-                """
                 if use_annealing:
                     postfix["temp"] = f"{temperature:.4e}"
-                """
                 pbar.set_postfix(postfix)
 
             # Record epoch metrics
@@ -319,7 +282,7 @@ class Trainer:
 
             # Validation
             if val_data is not None:
-                val_loss, val_acc = self.evaluate(val_data)
+                val_loss, val_acc = self.evaluate(val_data, temperature=temperature)
                 self.history["val_loss"].append(val_loss)
                 self.history["val_acc"].append(val_acc)
                 print(
