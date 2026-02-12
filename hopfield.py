@@ -55,9 +55,6 @@ def convert_hnl_to_hopfield(
     bin_inv = jnp.stack([proj.T for proj in bin_proj])
     bin_proj = jnp.stack(bin_proj)
 
-    print(bin_proj.shape)
-    print(bin_inv.shape)
-
     # Binarize memories and project to binary space
     # memories: (num_heads, num_memories, head_dim)
     # binary_memories = binarize_memories(hnl.memories)
@@ -85,18 +82,16 @@ def convert_hnl_to_hopfield(
     mem_back = jnp.einsum("hmb,hdb->hmd", weight_matrix, bin_inv)
     mem_back /= jnp.linalg.norm(mem_back, axis=-1, keepdims=True)
     err = jnp.mean(jnp.linalg.norm(memories - mem_back, axis=-1))
-    print(err)
 
     return HopfieldHNL(
-        in_features=hnl.in_features,
-        out_features=hnl.out_feats,
+        in_feats=hnl.in_feats,
+        out_feats=hnl.out_feats,
         num_heads=hnl.num_heads,
         head_dim=hnl.head_dim,
+        is_class=hnl.is_class,
+        query_proj=hnl.query_proj,
         binary_dim=binary_dim,
         num_iterations=num_iterations,
-        use_activation=hnl.use_activation,
-        query_proj=hnl.query_proj,
-        layer_norm=hnl.layer_norm,
         bin_proj=bin_proj,
         bin_inv=bin_inv,
         weight_matrix=weight_matrix,

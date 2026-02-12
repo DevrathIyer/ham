@@ -131,7 +131,7 @@ def create_model(
         if in_feats > 1000:
             hidden_dims = [256, 128]
         elif in_feats > 100:
-            hidden_dims = [256]
+            hidden_dims = [64, 8]
         else:
             hidden_dims = [32, 16]
 
@@ -209,7 +209,7 @@ def train(
         # End with lower temperature approaching hard attention
         temp_start = 1e0  # Higher temperature = softer attention
         # temp_end = 5e-4  # lower temperature = sharp attention
-        temp_end = 9e-1  # lower temperature = sharp attention
+        temp_end = 5e-3  # lower temperature = sharp attention
     else:
         loss_fn = hnm_cross_entropy_loss
         temp_start = None
