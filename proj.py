@@ -1,3 +1,5 @@
+import math
+
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -80,42 +82,22 @@ print(np.mean(((q_dists) / np.linalg.norm(X, axis=-1)) ** 2))
 """
 
 
-def compare_scaling(d=8, k_range=[64, 128, 256, 512, 1024, 2048, 4096]):
-    # 1. Setup original data (Normalized)
-    x = np.random.randn(10000, d)
-    x /= np.linalg.norm(x, axis=-1, keepdims=True)
-
+def compare_scaling(d_range=[8, 16, 32, 64], k_range=[1e4, 2e4, 1e5, 2e5, 1e6, 2e6]):
     plt.figure(figsize=(10, 6))
+    for d in d_range:
+        # 1. Setup original data (Normalized)
 
-    bin_errors = []
-    for k in k_range:
-        # --- BINARY METHOD (SRP with Orthogonalization) ---
-        # Generate Blocked Orthogonal Matrix for better binary performance
-        blocks = []
-        for _ in range(int(np.ceil(k / d))):
-            Q, _ = np.linalg.qr(np.random.randn(d, d))
-            blocks.append(Q)
-        W_bin = np.vstack(blocks)[:k, :]
-        # Project to 0/1 codes
-        bits = np.sign(np.einsum("kd,bd->bk", W_bin, x))
-        # Reconstruct: Map {0,1} -> {-1,1} and use Transpose
-        # centered_bits = 2 * bits - 1
-        x_hat_bin = np.einsum("bk,kd->bd", bits, W_bin)
-        x_hat_bin /= np.linalg.norm(x_hat_bin, axis=-1, keepdims=True)  # Re-normalize
-        bin_errors.append(np.mean(np.linalg.norm(x - x_hat_bin, axis=-1), axis=-1))
-    """
-    plt.plot(
-        np.array(k_range),
-        bin_errors,
-        "s--",
-        label="Bipolar",
-        # color="crimson",
-        linewidth=2,
-    )
-    """
-    for z_dims in [8, 16, 24, 32]:
+        x = np.random.randn(200, d)
+        x /= np.linalg.norm(x, axis=-1, keepdims=True)
+
         bin_errors = []
+        ks = []
+        bin_errors = []
+        z_dims = []
         for k in k_range:
+            k = int(k)
+            z_dim = int(math.pow(k, 1 / 3))
+            z_dims.append(z_dim)
             # --- BINARY METHOD (SRP with Orthogonalization) ---
             # Generate Blocked Orthogonal Matrix for better binary performance
             blocks = []
@@ -127,10 +109,10 @@ def compare_scaling(d=8, k_range=[64, 128, 256, 512, 1024, 2048, 4096]):
             # z_dims = int(sparsity * k)
             # Project to 0/1 codes
             bits = 1 - np.einsum("kd,bd->bk", W_bin, x)
-            partition = np.argpartition(bits, z_dims, axis=-1)
+            partition = np.argpartition(bits, z_dim, axis=-1)
 
-            bits[np.arange(bits.shape[0])[:, None], partition[:, :z_dims]] = 1
-            bits[np.arange(bits.shape[0])[:, None], partition[:, z_dims:]] = 0
+            bits[np.arange(bits.shape[0])[:, None], partition[:, :z_dim]] = 1
+            bits[np.arange(bits.shape[0])[:, None], partition[:, z_dim:]] = 0
             bits = bits.astype(int)
 
             # bits = (np.argpartition(np.einsum("kd,bd->bk", W_bin, x), axis=-1) >= sparsity).astype(int)
@@ -142,31 +124,33 @@ def compare_scaling(d=8, k_range=[64, 128, 256, 512, 1024, 2048, 4096]):
             bin_errors.append(np.mean(np.linalg.norm(x - x_hat_bin, axis=-1), axis=-1))
 
         plt.plot(
-            k_range,
+            z_dims,
             bin_errors,
             "s--",
-            label=f"Binary ({z_dims:0.2f} active)",
+            # label=f"Binary ($N^1/3$) sparsity)",
             # color="crimson",
             linewidth=2,
         )
 
-    # Plotting results
-    """
-    plt.plot(
-        k_range,
-        0.23 * 9 / (np.log2(k_range)),
-        "o-",
-        label="Scaling Law (1/sqrt(k))",
-        color="royalblue",
-        linewidth=2,
-    )
-    """
+        # pow = 0.500 + 8 / d
+        pow = 0.5 * (1 + 1 / math.pow(d, 1 / 3))
+        print(f"pow: {pow}")
+        # Plotting results
+        plt.plot(
+            z_dims,
+            np.pow(z_dims[0], pow) * bin_errors[0] / np.pow(z_dims, pow),
+            "o-",
+            label=f"D = {d}",
+            linewidth=2,
+        )
 
     plt.xscale("log")
     plt.yscale("log")
-    plt.xlabel("Active Dimensions(k)")
+    plt.xlabel("Active Dimensions")
     plt.ylabel("L2 Reconstruction Error")
-    plt.title(f"Scaling Comparison: Sparsity level vs. Error")
+    plt.title(
+        f"Scaling Comparison: Reconstruction Error vs. Active Dimenisons, varying continuous dimension (d={d})"
+    )
     plt.legend()
     plt.grid(True, which="both", ls="-", alpha=0.2)
     plt.show()

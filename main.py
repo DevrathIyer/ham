@@ -13,7 +13,8 @@ from data import (DataLoader, get_cifar10_data, get_fashion_mnist_data,
                   get_mnist_data, get_regression_data, get_synthetic_data)
 from hopfield import convert_hnm_to_hopfield
 from models import CNN, HNL, HNM, MLP, count_parameters
-from training import TrainConfig, Trainer, cross_entropy_loss, mse_loss
+from training import (TrainConfig, Trainer, cross_entropy_loss,
+                      hnm_cross_entropy_loss, mse_loss)
 from visualization import (plot_confusion_matrix, plot_hnm_mem_weights,
                            plot_image_predictions, plot_synthetic_data_2d,
                            plot_training_history)
@@ -130,7 +131,7 @@ def create_model(
         if in_feats > 1000:
             hidden_dims = [256, 128]
         elif in_feats > 100:
-            hidden_dims = [64, 64]
+            hidden_dims = [64, 8]
         else:
             hidden_dims = [32, 16]
 
@@ -140,11 +141,10 @@ def create_model(
         layers = []
 
         l1_key, l2_key, l3_key = jax.random.split(key, 3)
-        mems = 16
-        temp = 2e-2
-        layers.append(HNL(784, 64, mems, 4, key=l1_key, temp=temp / mems))
-        # layers.append(HNL(64, 64, mems, 4, key=l2_key, temp=temp / mems))
-        layers.append(HNL(64, 64, 10, 1, key=l3_key, temp=temp / 10))
+        mems = 10
+        layers.append(HNL(784, 64, 16, 8, key=l1_key))
+        layers.append(HNL(64, 8, 10, 1, key=l2_key, is_class=True))
+        # layers.append(HNL(256, 64, 10, 1, key=l3_key, temp=temp))
 
         return HNM(layers)
 
@@ -197,8 +197,23 @@ def train(
     model = create_model(model_type, config, model_key, flatten=flatten)
     print(f"Model parameters: {count_parameters(model):,}")
 
-    # Select loss function
-    loss_fn = mse_loss if config.is_regression else cross_entropy_loss
+    # Select loss function and configure temperature annealing
+    if config.is_regression:
+        loss_fn = mse_loss
+        temp_start = None
+        temp_end = None
+    elif model_type == "hnm":
+        loss_fn = hnm_cross_entropy_loss
+        # Temperature annealing for HNM models:
+        # Start with higher temperature for soft attention (better gradients)
+        # End with lower temperature approaching hard attention
+        temp_start = 1e0  # Higher temperature = softer attention
+        # temp_end = 5e-4  # lower temperature = sharp attention
+        temp_end = 5e-3  # lower temperature = sharp attention
+    else:
+        loss_fn = hnm_cross_entropy_loss
+        temp_start = None
+        temp_end = None
 
     # Training config
     train_config = TrainConfig(
@@ -207,6 +222,8 @@ def train(
         batch_size=batch_size,
         checkpoint_dir=f"./checkpoints/{dataset}_{model_type}",
         checkpoint_every=max(1, epochs // 5),
+        temp_start=temp_start,
+        temp_end=temp_end,
     )
 
     # Handle regression separately (custom training loop)
@@ -221,7 +238,7 @@ def train(
     trained_model = trainer.train((X_train, y_train), (X_test, y_test), key=train_key)
 
     # Evaluate
-    test_loss, test_acc = trainer.evaluate((X_test, y_test))
+    test_loss, test_acc = trainer.evaluate((X_test, y_test), temperature=temp_end)
     print(f"\nFinal Test Accuracy (Soft Attention): {test_acc:.4f}")
 
     # Evaluate

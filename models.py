@@ -16,7 +16,9 @@ class MLP(eqx.Module):
         self.layers = layers
         self.activation = activation
 
-    def __call__(self, x: jax.Array, *, key: jax.Array) -> jax.Array:
+    def __call__(
+        self, x: jax.Array, hard: bool, key: jax.Array, temperature: float | None = None
+    ) -> jax.Array:
         for layer in self.layers[:-1]:
             x = self.activation(layer(x))
         return self.layers[-1](x)
@@ -49,10 +51,9 @@ class HNL(eqx.Module):
     num_mems: int
     num_heads: int
     head_dim: int
-    temperature: float
+    is_class: bool
     query_proj: eqx.nn.Linear
     memories: jax.Array
-    layer_norm: eqx.nn.LayerNorm
     dropout: eqx.nn.Dropout
 
     def __init__(
@@ -61,8 +62,8 @@ class HNL(eqx.Module):
         out_feats: int,
         num_mems: int,
         num_heads: int,
+        is_class: bool = False,
         dropout_rate: float = 0.0,
-        temp: float = 1e-2,
         *,
         key: jax.Array,
     ):
@@ -75,8 +76,7 @@ class HNL(eqx.Module):
         self.num_mems = num_mems
         self.num_heads = num_heads
         self.head_dim = out_feats // num_heads
-        self.temperature = temp
-        print(f"N_heads is {self.num_heads}")
+        self.is_class = is_class
 
         k1, k2, k3, k4, k5 = jax.random.split(key, 5)
 
@@ -84,30 +84,30 @@ class HNL(eqx.Module):
         self.memories = (
             jax.random.normal(k3, (num_heads, num_mems, self.head_dim)) * 0.02
         )
-        self.layer_norm = eqx.nn.LayerNorm(out_feats)
         self.dropout = eqx.nn.Dropout(dropout_rate)
 
-    def __call__(self, x: jax.Array, hard: bool, key: jax.Array) -> jax.Array:
+    def __call__(
+        self, x: jax.Array, hard: bool, key: jax.Array, temperature: float | None = None
+    ) -> jax.Array:
         q = self.query_proj(x)
         q = q.reshape(self.num_heads, self.head_dim)
 
         q_norm = q / jnp.linalg.norm(q, axis=-1, keepdims=True)
-        # mem_norm = self.memories / jnp.sum(self.memories, axis=-1, keepdims=True)
         mem_norm = self.memories / jnp.linalg.norm(
             self.memories, axis=-1, keepdims=True
         )
 
         attn_scores = jnp.einsum("hd,hmd->hm", q_norm, mem_norm)
-        if hard:
-            top_mems = jnp.argmax(attn_scores, axis=-1)
-            out = self.memories[jnp.arange(self.num_heads), top_mems]
+        if self.is_class:
+            return attn_scores.flatten() * 10
         else:
-            attn_weights = jax.nn.softmax(attn_scores / self.temperature, axis=-1)
-            out = jnp.einsum("hm,hmd->hd", attn_weights, mem_norm)
-
+            if hard:
+                top_mems = jnp.argmax(attn_scores, axis=-1)
+                mem_probs = jax.nn.one_hot(top_mems, num_classes=self.num_mems, axis=-1)
+            else:
+                mem_probs = jax.nn.softmax(attn_scores / temperature, axis=-1)
+        out = jnp.einsum("hm,hmd->hd", mem_probs, mem_norm) * jnp.sqrt(self.head_dim)
         out = out.reshape(self.out_feats)
-        out = self.layer_norm(out)
-        out = self.dropout(out, key=key)
         return out
 
 
@@ -117,10 +117,16 @@ class HNM(eqx.Module):
     def __init__(self, layers: HNL):
         self.layers = layers
 
-    def __call__(self, x: jax.Array, key: jax.Array, hard: bool = False) -> jax.Array:
+    def __call__(
+        self,
+        x: jax.Array,
+        key: jax.Array,
+        hard: bool = False,
+        temperature: float | None = None,
+    ) -> jax.Array:
         keys = jax.random.split(key, len(self.layers))
         for layer, k in zip(self.layers, keys):
-            x = layer(x, hard, key=k)
+            x = layer(x, hard, key=k, temperature=temperature)
         return x
 
 
@@ -232,87 +238,51 @@ def count_parameters(model: eqx.Module) -> int:
     return sum(x.size for x in jax.tree_util.tree_leaves(params))
 
 
-# =============================================================================
-# Hopfield Network Layers (Binary, for inference after training)
-# =============================================================================
-
-
 class HopfieldHNL(eqx.Module):
-    """Binary Hopfield version of HNL for inference.
-
-    Replaces soft attention with discrete Hopfield dynamics:
-    1. Project query to binary space via bin_proj
-    2. Run Hopfield iterations
-    3. Project back to real space via bin_proj.T
-    """
-
-    in_features: int
-    out_features: int
+    in_feats: int
+    out_feats: int
+    num_mems: int
     num_heads: int
     head_dim: int
+    is_class: bool
+    query_proj: eqx.nn.Linear
     binary_dim: int
     num_iterations: int
-    query_proj: eqx.nn.Linear
-    layer_norm: eqx.nn.LayerNorm
     bin_proj: jax.Array  # (num_heads, binary_dim, head_dim)
-    bin_inv: jax.Array  # (num_heads, binary_dim, head_dim)
     weight_matrix: jax.Array  # (num_heads, num_memories, binary_dim)
     memories: jax.Array  # (num_heads, num_memories, head_dim)
-    temperature: float = 1e-2
-    # weight_matrix: jax.Array  # (num_heads, binary_dim, binary_dim)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         q = self.query_proj(x)
         q = q.reshape(self.num_heads, self.head_dim)
 
         q_norm = q / jnp.linalg.norm(q, axis=-1, keepdims=True)
-        bq = jnp.sign(jnp.einsum("hd,hbd->hb", q_norm, self.bin_proj))
+        # bq = jnp.sign(jnp.einsum("hd,hbd->hb", q_norm, self.bin_proj))
+        z_dim = 64
+        bin_scores = jnp.einsum("hbd,hd->hb", self.bin_proj, q_norm)
+        _, indices = jax.lax.top_k(bin_scores, z_dim, axis=-1)
+        mask = jnp.zeros_like(bin_scores)
+        bq = mask.at[jnp.arange(self.num_heads)[:, None], indices].set(1.0)
 
-        q_back = jnp.einsum("hb,hdb->hd", bq, self.bin_inv)
-        q_back /= jnp.linalg.norm(q_back, axis=-1, keepdims=True)
-        err = jnp.mean(jnp.linalg.norm(q_norm - q_back, axis=-1))
-        """
-        jax.debug.print(
-            "err: {err}",
-            err=err,
-        )
-        """
-
-        attn_scores = jnp.cos(
+        attn_scores = jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.binary_dim
+        """jnp.cos(
             jnp.pi
             / 2
             * (1 - (jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.binary_dim))
         )
-        # attn_scores = jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.binary_dim
-        # attn_scores = jnp.sign(attn_scores) * jnp.sqrt(jnp.abs(attn_scores))
-
-        # jax.debug.print("{}", jnp.linalg.norm(self.weight_matrix, axis=-1))
-        # jax.debug.print("{}", jnp.linalg.norm(bq, axis=-1))
-        memories = self.memories / jnp.linalg.norm(
-            self.memories, axis=-1, keepdims=True
-        )
-
-        # jax.debug.print("{}", jnp.linalg.norm(self.weight_matrix, axis=-1))
-        # jax.debug.print("{}", jnp.linalg.norm(bq, axis=-1))
-
-        c_scores = jnp.einsum("hd,hmd->hm", q_norm, memories)
-        # jax.debug.print("{} {}", jnp.max(attn_scores), jnp.max(c_scores))
-        err = jnp.mean((attn_scores - c_scores))
-        """
-        jax.debug.print(
-            "err: {err}",
-            err=err,
-        )
         """
 
-        attn_weights = jax.nn.softmax(attn_scores / self.temperature, axis=-1)
-        out = jnp.einsum("hm,hmb->hb", attn_weights, self.weight_matrix)
-        out = jnp.einsum("hb,hdb->hd", out, self.bin_inv)
-        out /= jnp.linalg.norm(out, axis=-1, keepdims=True)
+        if self.is_class:
+            return attn_scores.flatten() * 10  # TODO: FIX?
 
-        out = out.reshape(self.out_features)
-        out = self.layer_norm(out)
-        # jax.debug.print("{out}", out=out)
+        top_mems = jnp.argmax(attn_scores, axis=-1)
+        mem_probs = jax.nn.one_hot(top_mems, num_classes=self.num_mems, axis=-1)
+
+        out = jnp.einsum("hm,hmb->hb", mem_probs, self.weight_matrix)
+        out = jnp.einsum("hb,hbd->hd", out, self.bin_proj)
+
+        out *= jnp.sqrt(self.head_dim) / jnp.linalg.norm(out, axis=-1, keepdims=True)
+        out = out.reshape(self.out_feats)
         return out
 
 

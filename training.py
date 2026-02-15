@@ -34,6 +34,33 @@ class TrainConfig:
     checkpoint_dir: str = "./checkpoints"
     checkpoint_every: int = 5
     log_every: int = 100
+    # Temperature annealing parameters (both must be set to enable annealing)
+    temp_start: float | None = (
+        None  # Starting temperature (e.g., 0.1 for soft attention)
+    )
+    temp_end: float | None = (
+        None  # Ending temperature (e.g., 0.001 for sharp attention)
+    )
+    temp_anneal_steps: int | None = (
+        None  # Number of steps to anneal over (if None, uses all epochs)
+    )
+
+
+def compute_annealed_temperature(
+    step: int,
+    total_steps: int,
+    temp_start: float,
+    temp_end: float,
+) -> float:
+    if step >= total_steps:
+        return temp_end
+
+    progress = step / total_steps
+
+    # return temp_end + (temp_start - temp_end) * 0.5 * (1 + jnp.cos(jnp.pi * progress))
+    # return jnp.array(temp_start + (temp_end - temp_start) * progress, dtype=jnp.float32)
+    decay_rate = jnp.log(temp_end / temp_start)
+    return temp_start * jnp.exp(decay_rate * progress)
 
 
 class Trainer:
@@ -78,6 +105,37 @@ class Trainer:
         self.checkpoint_dir = Path(self.config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+        # Validate temperature annealing configuration
+        if (self.config.temp_start is None) != (self.config.temp_end is None):
+            raise ValueError(
+                "Both temp_start and temp_end must be set together to enable annealing, "
+                "or both must be None to disable it."
+            )
+        if (
+            self.config.temp_start is not None
+            and self.config.temp_end is not None
+            and self.config.temp_start <= self.config.temp_end
+        ):
+            raise ValueError(
+                f"temp_start ({self.config.temp_start}) must be greater than "
+                f"temp_end ({self.config.temp_end}) for annealing to work."
+            )
+
+        # Check if model supports temperature parameter (HNM models do)
+        from models import HNM
+
+        self.is_hnm = isinstance(model, HNM)
+
+    def _compute_logits(
+        self,
+        model: eqx.Module,
+        x: jax.Array,
+        keys: jax.Array,
+        hard: bool = False,
+        temperature: float | None = None,
+    ) -> jax.Array:
+        return jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, hard, temperature)
+
     @eqx.filter_jit
     def _train_step(
         self,
@@ -86,9 +144,12 @@ class Trainer:
         x: jax.Array,
         y: jax.Array,
         key: jax.Array,
+        temperature: float | None = None,
     ) -> tuple[eqx.Module, optax.OptState, jax.Array]:
         """Single training step."""
-        loss, grads = eqx.filter_value_and_grad(self.loss_fn)(model, x, y, key=key)
+        loss, grads = eqx.filter_value_and_grad(self.loss_fn)(
+            model, x, y, key=key, temperature=temperature
+        )
         updates, opt_state = self.optimizer.update(
             grads, opt_state, eqx.filter(model, eqx.is_array)
         )
@@ -101,16 +162,25 @@ class Trainer:
         model: eqx.Module,
         x: jax.Array,
         y: jax.Array,
+        temperature: jax.Array = None,
         hard=False,
     ) -> tuple[jax.Array, jax.Array]:
-        """Evaluation step returning loss and accuracy (inference mode, no dropout)."""
+        """Evaluation step returning loss and accuracy (inference mode, no dropout).
+
+        Note: Uses model's default temperature (no annealing) for consistent evaluation.
+        """
         model = eqx.nn.inference_mode(model)
         # Use a dummy key since inference_mode disables dropout
         dummy_key = jax.random.PRNGKey(0)
         keys = jax.random.split(dummy_key, x.shape[0])
-        logits = jax.vmap(model, in_axes=(0, 0, None))(x, keys, hard)
+        # Use None for temperature to get consistent evaluation with model defaults
+        logits = self._compute_logits(
+            model, x, keys, hard=hard, temperature=temperature
+        )
+        print(logits.shape)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
         preds = jnp.argmax(logits, axis=-1)
+        print(preds.shape)
         acc = jnp.mean(preds == y)
         return loss, acc
 
@@ -137,6 +207,18 @@ class Trainer:
             X_train, y_train, self.config.batch_size, shuffle=True, key=loader_key
         )
 
+        # Calculate total steps for temperature annealing
+        steps_per_epoch = len(X_train) // self.config.batch_size
+        if self.config.temp_anneal_steps is not None:
+            total_anneal_steps = self.config.temp_anneal_steps
+        else:
+            total_anneal_steps = self.config.epochs * steps_per_epoch
+
+        # Determine if we should use temperature annealing
+        use_annealing = (
+            self.config.temp_start is not None and self.config.temp_end is not None
+        )
+
         for epoch in range(self.config.epochs):
             self.epoch = epoch
             epoch_loss = 0.0
@@ -145,16 +227,39 @@ class Trainer:
 
             pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{self.config.epochs}")
             for x_batch, y_batch in pbar:
+                # Compute annealed temperature for this step
+                if use_annealing:
+                    temperature = jnp.array(
+                        compute_annealed_temperature(
+                            self.step,
+                            total_anneal_steps,
+                            self.config.temp_start,
+                            self.config.temp_end,
+                        )
+                    )
+                else:
+                    temperature = None
+
                 key, step_key = jax.random.split(key)
                 self.model, self.opt_state, loss = self._train_step(
-                    self.model, self.opt_state, x_batch, y_batch, step_key
+                    self.model, self.opt_state, x_batch, y_batch, step_key, temperature
                 )
 
-                # Compute accuracy for display (use inference mode)
+                # Compute accuracy for display (use inference mode with default temperature)
+                # Note: We use model's default temperature (not annealed) for consistent metrics
                 inference_model = eqx.nn.inference_mode(self.model)
                 dummy_key = jax.random.PRNGKey(0)
                 batch_keys = jax.random.split(dummy_key, x_batch.shape[0])
-                logits = jax.vmap(inference_model)(x_batch, key=batch_keys)
+
+                # Use helper to compute logits with consistent calling convention
+                logits = self._compute_logits(
+                    inference_model,
+                    x_batch,
+                    batch_keys,
+                    hard=False,
+                    temperature=temperature,
+                )
+                # jax.debug.print("{}, {}", logits[:5], y_batch[:5])
                 preds = jnp.argmax(logits, axis=-1)
                 acc = jnp.mean(preds == y_batch)
 
@@ -163,7 +268,11 @@ class Trainer:
                 n_batches += 1
                 self.step += 1
 
-                pbar.set_postfix({"loss": f"{loss:.4f}", "acc": f"{acc:.4f}"})
+                # Show temperature in progress bar if using annealing
+                postfix = {"loss": f"{loss:.4f}", "acc": f"{acc:.4f}"}
+                if use_annealing:
+                    postfix["temp"] = f"{temperature:.4e}"
+                pbar.set_postfix(postfix)
 
             # Record epoch metrics
             avg_loss = epoch_loss / n_batches
@@ -173,7 +282,7 @@ class Trainer:
 
             # Validation
             if val_data is not None:
-                val_loss, val_acc = self.evaluate(val_data)
+                val_loss, val_acc = self.evaluate(val_data, temperature=temperature)
                 self.history["val_loss"].append(val_loss)
                 self.history["val_acc"].append(val_acc)
                 print(
@@ -277,3 +386,29 @@ def mse_loss(
     keys = jax.random.split(key, x.shape[0])
     preds = jax.vmap(model)(x, key=keys).squeeze()
     return jnp.mean((preds - y) ** 2)
+
+
+def hnm_cross_entropy_loss(
+    model: eqx.Module,
+    x: jax.Array,
+    y: jax.Array,
+    *,
+    key: jax.Array,
+    temperature: float | None = None,
+) -> jax.Array:
+    """Cross-entropy loss for HNM models with temperature support.
+
+    Args:
+        model: HNM model
+        x: Input batch (N, ...)
+        y: Label batch (N,)
+        key: Random key for dropout
+        temperature: Optional temperature override for annealing
+
+    Returns:
+        Mean cross-entropy loss
+    """
+    keys = jax.random.split(key, x.shape[0])
+    # HNM models take (x, key, hard, temperature)
+    logits = jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, False, temperature)
+    return optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
