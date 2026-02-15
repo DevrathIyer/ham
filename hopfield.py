@@ -47,6 +47,19 @@ def convert_hnl_to_hopfield(
 ) -> HopfieldHNL:
     # Create binary projection for each head: (num_heads, binary_dim, head_dim)
     keys = jax.random.split(key, hnl.num_heads)
+
+    print(binary_dim)
+    d = hnl.head_dim
+    Ws = []
+    for key in keys:
+        blocks = []
+        for _ in range(int(jnp.ceil(binary_dim / d))):
+            n_key, key = jax.random.split(key)
+            Q, _ = jnp.linalg.qr(jax.random.normal(n_key, (d, d)))
+            blocks.append(Q)
+        Ws.append(jnp.vstack(blocks)[:binary_dim, :])
+
+    """
     bin_proj = [
         jnp.linalg.qr(jax.random.normal(key, (binary_dim, hnl.head_dim)))[0]
         for key in keys
@@ -54,6 +67,8 @@ def convert_hnl_to_hopfield(
 
     bin_inv = jnp.stack([proj.T for proj in bin_proj])
     bin_proj = jnp.stack(bin_proj)
+    """
+    bin_proj = jnp.asarray(Ws)
 
     # Binarize memories and project to binary space
     # memories: (num_heads, num_memories, head_dim)
@@ -63,29 +78,38 @@ def convert_hnl_to_hopfield(
     # Project each memory through bin_proj to get patterns in binary_dim space
     # For each head: (num_memories, head_dim) @ (binary_dim, head_dim).T -> (num_memories, binary_dim)
     # Then binarize the projected patterns
-    def compute_weights_for_head(bin_proj_h, mem_h):
-        # mem_h = mem_h / jnp.linalg.norm(mem_h, axis=-1, keepdims=True)
-        binary_patterns = jnp.sign(mem_h @ bin_proj_h.T)  # (num_memories, binary_dim)
+    z_dim = 64
 
-        """
-        binary_patterns = binary_patterns / jnp.linalg.norm(
-            binary_patterns, axis=-1, keepdims=True
+    def compute_weights_for_head(bin_proj_h, mem_h):
+        mem_h = mem_h / jnp.linalg.norm(mem_h, axis=-1, keepdims=True)
+        bin_scores = jnp.einsum("kd,md->mk", bin_proj_h, mem_h)
+        _, indices = jax.lax.top_k(bin_scores, z_dim, axis=-1)
+        mask = jnp.zeros_like(bin_scores)
+        mem_h_bits = mask.at[jnp.arange(mem_h.shape[0])[:, None], indices].set(1.0)
+        # mem_h_bits = jnp.take_along_axis(mask, indices, values=1.0, axis=-1)
+
+        mem_h_bin = jnp.einsum("mk,kd->md", mem_h_bits, bin_proj_h)
+        mem_h_bin /= jnp.linalg.norm(mem_h_bin, axis=-1, keepdims=True)  # Re-normalize
+        jax.debug.print(
+            "Error: {}", jnp.mean(jnp.linalg.norm(mem_h - mem_h_bin, axis=-1), axis=-1)
         )
-        """
-        # return compute_hopfield_weights(binary_patterns)
-        return binary_patterns
+        return mem_h_bits
 
     weight_matrix = jax.vmap(compute_weights_for_head)(bin_proj, binary_memories)
+    print(weight_matrix[0])
+    print(f"Weight sparsity: {jnp.mean(weight_matrix)}")
 
     memories = hnl.memories / jnp.linalg.norm(hnl.memories, axis=-1, keepdims=True)
-
+    """
     mem_back = jnp.einsum("hmb,hdb->hmd", weight_matrix, bin_inv)
     mem_back /= jnp.linalg.norm(mem_back, axis=-1, keepdims=True)
     err = jnp.mean(jnp.linalg.norm(memories - mem_back, axis=-1))
+    """
 
     return HopfieldHNL(
         in_feats=hnl.in_feats,
         out_feats=hnl.out_feats,
+        num_mems=hnl.num_mems,
         num_heads=hnl.num_heads,
         head_dim=hnl.head_dim,
         is_class=hnl.is_class,
@@ -93,7 +117,6 @@ def convert_hnl_to_hopfield(
         binary_dim=binary_dim,
         num_iterations=num_iterations,
         bin_proj=bin_proj,
-        bin_inv=bin_inv,
         weight_matrix=weight_matrix,
         memories=hnl.memories,
     )

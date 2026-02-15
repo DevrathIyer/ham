@@ -103,7 +103,7 @@ class HNL(eqx.Module):
         else:
             if hard:
                 top_mems = jnp.argmax(attn_scores, axis=-1)
-                mem_probs = jax.nn.one_hot(top_mems, num_classes=self.head_dim, axis=-1)
+                mem_probs = jax.nn.one_hot(top_mems, num_classes=self.num_mems, axis=-1)
             else:
                 mem_probs = jax.nn.softmax(attn_scores / temperature, axis=-1)
         out = jnp.einsum("hm,hmd->hd", mem_probs, mem_norm) * jnp.sqrt(self.head_dim)
@@ -241,6 +241,7 @@ def count_parameters(model: eqx.Module) -> int:
 class HopfieldHNL(eqx.Module):
     in_feats: int
     out_feats: int
+    num_mems: int
     num_heads: int
     head_dim: int
     is_class: bool
@@ -248,7 +249,6 @@ class HopfieldHNL(eqx.Module):
     binary_dim: int
     num_iterations: int
     bin_proj: jax.Array  # (num_heads, binary_dim, head_dim)
-    bin_inv: jax.Array  # (num_heads, binary_dim, head_dim)
     weight_matrix: jax.Array  # (num_heads, num_memories, binary_dim)
     memories: jax.Array  # (num_heads, num_memories, head_dim)
 
@@ -257,22 +257,29 @@ class HopfieldHNL(eqx.Module):
         q = q.reshape(self.num_heads, self.head_dim)
 
         q_norm = q / jnp.linalg.norm(q, axis=-1, keepdims=True)
-        bq = jnp.sign(jnp.einsum("hd,hbd->hb", q_norm, self.bin_proj))
+        # bq = jnp.sign(jnp.einsum("hd,hbd->hb", q_norm, self.bin_proj))
+        z_dim = 64
+        bin_scores = jnp.einsum("hbd,hd->hb", self.bin_proj, q_norm)
+        _, indices = jax.lax.top_k(bin_scores, z_dim, axis=-1)
+        mask = jnp.zeros_like(bin_scores)
+        bq = mask.at[jnp.arange(self.num_heads)[:, None], indices].set(1.0)
 
-        attn_scores = jnp.cos(
+        attn_scores = jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.binary_dim
+        """jnp.cos(
             jnp.pi
             / 2
             * (1 - (jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.binary_dim))
         )
+        """
 
         if self.is_class:
             return attn_scores.flatten() * 10  # TODO: FIX?
 
         top_mems = jnp.argmax(attn_scores, axis=-1)
-        mem_probs = jax.nn.one_hot(top_mems, num_classes=self.head_dim, axis=-1)
+        mem_probs = jax.nn.one_hot(top_mems, num_classes=self.num_mems, axis=-1)
 
         out = jnp.einsum("hm,hmb->hb", mem_probs, self.weight_matrix)
-        out = jnp.einsum("hb,hdb->hd", out, self.bin_inv)
+        out = jnp.einsum("hb,hbd->hd", out, self.bin_proj)
 
         out *= jnp.sqrt(self.head_dim) / jnp.linalg.norm(out, axis=-1, keepdims=True)
         out = out.reshape(self.out_feats)

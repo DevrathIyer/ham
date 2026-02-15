@@ -142,7 +142,7 @@ def create_model(
 
         l1_key, l2_key, l3_key = jax.random.split(key, 3)
         mems = 10
-        layers.append(HNL(784, 64, 16, 4, key=l1_key))
+        layers.append(HNL(784, 64, 16, 8, key=l1_key))
         layers.append(HNL(64, 8, 10, 1, key=l2_key, is_class=True))
         # layers.append(HNL(256, 64, 10, 1, key=l3_key, temp=temp))
 
