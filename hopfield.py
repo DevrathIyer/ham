@@ -96,7 +96,7 @@ def convert_hnl_to_hopfield(
         return mem_h_bits
 
     weight_matrix = jax.vmap(compute_weights_for_head)(bin_proj, binary_memories)
-    print(weight_matrix[0])
+    print(weight_matrix.shape)
     print(f"Weight sparsity: {jnp.mean(weight_matrix)}")
 
     memories = hnl.memories / jnp.linalg.norm(hnl.memories, axis=-1, keepdims=True)

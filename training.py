@@ -177,10 +177,8 @@ class Trainer:
         logits = self._compute_logits(
             model, x, keys, hard=hard, temperature=temperature
         )
-        print(logits.shape)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
         preds = jnp.argmax(logits, axis=-1)
-        print(preds.shape)
         acc = jnp.mean(preds == y)
         return loss, acc
 

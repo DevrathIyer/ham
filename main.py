@@ -141,9 +141,9 @@ def create_model(
         layers = []
 
         l1_key, l2_key, l3_key = jax.random.split(key, 3)
-        mems = 10
-        layers.append(HNL(784, 64, 16, 8, key=l1_key))
-        layers.append(HNL(64, 8, 10, 1, key=l2_key, is_class=True))
+        layers.append(HNL(784, 64, 8, 8, key=l1_key))
+        # layers.append(HNL(128, 128, 16, 16, key=l2_key))
+        layers.append(HNL(64, 8, 10, 1, key=l3_key, is_class=True))
         # layers.append(HNL(256, 64, 10, 1, key=l3_key, temp=temp))
 
         return HNM(layers)
@@ -208,7 +208,7 @@ def train(
         # Start with higher temperature for soft attention (better gradients)
         # End with lower temperature approaching hard attention
         temp_start = 1e0  # Higher temperature = softer attention
-        # temp_end = 5e-4  # lower temperature = sharp attention
+        # temp_end = 9.999e-1  # lower temperature = sharp attention
         temp_end = 5e-3  # lower temperature = sharp attention
     else:
         loss_fn = hnm_cross_entropy_loss
