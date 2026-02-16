@@ -1,5 +1,3 @@
-"""Model definitions using Equinox."""
-
 from typing import Callable
 
 import equinox as eqx
@@ -32,7 +30,6 @@ class MLP(eqx.Module):
         activation: Callable = jax.nn.relu,
         key: jax.Array,
     ) -> "MLP":
-        """Factory method for creating standard architectures."""
         dims = [in_features] + hidden_dims + [out_features]
         keys = jax.random.split(key, len(dims) - 1)
         layers = [
@@ -43,8 +40,6 @@ class MLP(eqx.Module):
 
 
 class HNL(eqx.Module):
-    """Hopfield Network Layer with Multi-Head External Attention."""
-
     in_feats: int
     out_feats: int
     num_mems: int
@@ -163,7 +158,6 @@ class CNN(eqx.Module):
         *,
         key: jax.Array,
     ) -> "CNN":
-        """Factory method for creating standard architectures."""
         keys = jax.random.split(key, 5)
         conv_layers = [
             eqx.nn.Conv2d(in_channels, 64, kernel_size=3, padding=1, key=keys[0]),
@@ -178,7 +172,6 @@ class CNN(eqx.Module):
 
 
 def count_parameters(model: eqx.Module) -> int:
-    """Count total trainable parameters in a model."""
     params, _ = eqx.partition(model, eqx.is_array)
     return sum(x.size for x in jax.tree_util.tree_leaves(params))
 
@@ -225,8 +218,6 @@ class HopfieldHNL(eqx.Module):
 
 
 class HopfieldHNM(eqx.Module):
-    """Hopfield Network Model - container for HopfieldHNL layers."""
-
     layers: tuple[HopfieldHNL, ...]
 
     def __init__(self, *layers: HopfieldHNL):

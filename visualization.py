@@ -1,5 +1,3 @@
-"""Visualization utilities for training and inference."""
-
 from pathlib import Path
 
 import jax
@@ -14,16 +12,6 @@ def plot_training_history(
     save_path: str | Path | None = None,
     figsize: tuple[int, int] = (12, 4),
 ) -> plt.Figure:
-    """Plot training history (loss and accuracy curves).
-
-    Args:
-        history: Dictionary with keys like 'train_loss', 'val_loss', 'train_acc', 'val_acc'
-        save_path: Optional path to save figure
-        figsize: Figure size
-
-    Returns:
-        Matplotlib figure
-    """
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
     # Plot loss
@@ -65,18 +53,6 @@ def plot_confusion_matrix(
     save_path: str | Path | None = None,
     figsize: tuple[int, int] = (8, 6),
 ) -> plt.Figure:
-    """Plot confusion matrix.
-
-    Args:
-        y_true: True labels
-        y_pred: Predicted labels
-        class_names: Optional class names for axis labels
-        save_path: Optional path to save figure
-        figsize: Figure size
-
-    Returns:
-        Matplotlib figure
-    """
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
 
@@ -129,20 +105,6 @@ def plot_image_predictions(
     save_path: str | Path | None = None,
     figsize: tuple[int, int] = (12, 12),
 ) -> plt.Figure:
-    """Plot sample images with predictions.
-
-    Args:
-        model: Trained model
-        images: Image array (N, C, H, W) or (N, H, W)
-        labels: True labels
-        n_samples: Number of samples to show
-        class_names: Optional list of class names for labels
-        save_path: Optional path to save figure
-        figsize: Figure size
-
-    Returns:
-        Matplotlib figure
-    """
     n_cols = int(np.ceil(np.sqrt(n_samples)))
     n_rows = int(np.ceil(n_samples / n_cols))
 
@@ -202,18 +164,6 @@ def plot_synthetic_data_2d(
     save_path: str | Path | None = None,
     figsize: tuple[int, int] = (10, 8),
 ) -> plt.Figure:
-    """Plot 2D synthetic data with optional decision boundary.
-
-    Args:
-        X: Data points (N, 2)
-        y: Labels
-        model: Optional model for decision boundary
-        save_path: Optional path to save figure
-        figsize: Figure size
-
-    Returns:
-        Matplotlib figure
-    """
     X = np.asarray(X)
     y = np.asarray(y)
 
@@ -262,17 +212,6 @@ def plot_hnm_mem_weights(
     save_path: str | Path | None = None,
     figsize: tuple[int, int] = (10, 10),
 ) -> plt.Figure:
-    """Plot the mem weights of the first HNL layer in an HNM.
-
-    Args:
-        model: Trained HNM model
-        image_shape: Optional (H, W) to reshape weights as images (e.g., (28, 28) for MNIST)
-        save_path: Optional path to save figure
-        figsize: Figure size
-
-    Returns:
-        Matplotlib figure
-    """
     if not hasattr(model, "layers") or len(model.layers) == 0:
         raise ValueError("Model must have a 'layers' attribute with at least one layer")
 
@@ -324,17 +263,6 @@ def plot_feature_importance(
     save_path: str | Path | None = None,
     figsize: tuple[int, int] = (10, 6),
 ) -> plt.Figure:
-    """Plot feature importance based on first layer weights (for MLP).
-
-    Args:
-        model: Trained MLP model
-        feature_names: Optional feature names
-        save_path: Optional path to save figure
-        figsize: Figure size
-
-    Returns:
-        Matplotlib figure
-    """
     # Get first layer weights
     if hasattr(model, "layers") and len(model.layers) > 0:
         weights = np.asarray(model.layers[0].weight)

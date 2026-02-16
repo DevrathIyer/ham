@@ -1,5 +1,3 @@
-"""Main entry point with example training scripts."""
-
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +18,6 @@ from visualization import (plot_confusion_matrix, plot_hnm_mem_weights,
 
 @dataclass
 class DatasetConfig:
-    """Configuration for a dataset."""
-
     name: str
     num_classes: int
     input_shape: tuple  # (C, H, W) for images or (features,) for tabular
@@ -79,16 +75,6 @@ def load_dataset(
     model_type: str,
     key: jax.Array | None = None,
 ) -> tuple[tuple, tuple, DatasetConfig]:
-    """Load a dataset by name.
-
-    Args:
-        dataset_name: Name of the dataset
-        model_type: Model type (affects whether images are flattened)
-        key: Random key for synthetic datasets
-
-    Returns:
-        (train_data, test_data, config)
-    """
     config = DATASET_CONFIGS[dataset_name]
     flatten = model_type != "cnn" and config.is_image
 
@@ -171,6 +157,10 @@ def train(
     convert_to_hopfield: bool = False,
     hopfield_iterations: int = 5,
     hopfield_binary_dim: int | None = None,
+    temp_start: float | None = None,
+    temp_end: float | None = None,
+    temp_anneal_steps: int | None = None,
+    resume_checkpoint: str | None = None,
 ) -> None:
     config = DATASET_CONFIGS[dataset]
 
@@ -193,22 +183,13 @@ def train(
     model = create_model(model_type, config, model_key, flatten=flatten)
     print(f"Model parameters: {count_parameters(model):,}")
 
-    # Select loss function and configure temperature annealing
-    if config.is_regression:
-        loss_fn = mse_loss
-        temp_start = None
-        temp_end = None
-    elif model_type == "hnm":
-        loss_fn = hnm_cross_entropy_loss
-        # Temperature annealing for HNM models:
-        # Start with higher temperature for soft attention (better gradients)
-        # End with lower temperature approaching hard attention
-        temp_start = 1e0
-        temp_end = 5e-3
-    else:
-        loss_fn = hnm_cross_entropy_loss
-        temp_start = None
-        temp_end = None
+    # Load checkpoint if resuming
+    if resume_checkpoint is not None:
+        model = eqx.tree_deserialise_leaves(resume_checkpoint, model)
+        print(f"Loaded checkpoint from {resume_checkpoint}")
+
+    # Select loss function
+    loss_fn = mse_loss if config.is_regression else hnm_cross_entropy_loss
 
     # Training config
     train_config = TrainConfig(
@@ -219,6 +200,7 @@ def train(
         checkpoint_every=max(1, epochs // 5),
         temp_start=temp_start,
         temp_end=temp_end,
+        temp_anneal_steps=temp_anneal_steps,
     )
 
     # Handle regression separately (custom training loop)
@@ -233,7 +215,7 @@ def train(
     trained_model = trainer.train((X_train, y_train), (X_test, y_test), key=train_key)
 
     # Evaluate
-    test_loss, test_acc = trainer.evaluate((X_test, y_test), temperature=temp_end)
+    test_loss, test_acc = trainer.evaluate((X_test, y_test), temperature=temp_end or 1.0)
     print(f"\nFinal Test Accuracy (Soft Attention): {test_acc:.4f}")
 
     # Evaluate
@@ -321,7 +303,6 @@ def train(
 
 
 def _train_regression(model, train_data, test_data, config, key):
-    """Custom training loop for regression tasks."""
     from tqdm import tqdm
 
     X_train, y_train = train_data
@@ -394,7 +375,6 @@ def _train_regression(model, train_data, test_data, config, key):
 
 
 def main():
-    """Main entry point."""
     parser = argparse.ArgumentParser(
         description="JAX/Equinox ML Training",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -403,6 +383,10 @@ Examples:
   python main.py --dataset mnist --model mlp
   python main.py --dataset cifar10 --model cnn --epochs 20
   python main.py --dataset fashion_mnist --model cnn --lr 0.001
+
+  # Train HNM without annealing, then resume with annealing:
+  python main.py -d mnist -m hnm --epochs 20
+  python main.py -d mnist -m hnm --epochs 20 --resume ./checkpoints/mnist_hnm/epoch_20.eqx --temp-start 1.0 --temp-end 0.005
         """,
     )
     parser.add_argument(
@@ -442,6 +426,30 @@ Examples:
         default=512,
         help="Binary dimension for Hopfield projection (default: num_memories)",
     )
+    parser.add_argument(
+        "--temp-start",
+        type=float,
+        default=None,
+        help="Starting temperature for annealing (e.g., 1.0 for soft attention)",
+    )
+    parser.add_argument(
+        "--temp-end",
+        type=float,
+        default=None,
+        help="Ending temperature for annealing (e.g., 0.005 for sharp attention)",
+    )
+    parser.add_argument(
+        "--temp-anneal-steps",
+        type=int,
+        default=None,
+        help="Number of steps to anneal over (default: all training steps)",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to a .eqx checkpoint file to resume training from",
+    )
 
     args = parser.parse_args()
 
@@ -465,6 +473,10 @@ Examples:
         convert_to_hopfield=args.hopfield,
         hopfield_iterations=args.hopfield_iterations,
         hopfield_binary_dim=args.hopfield_binary_dim,
+        temp_start=args.temp_start,
+        temp_end=args.temp_end,
+        temp_anneal_steps=args.temp_anneal_steps,
+        resume_checkpoint=args.resume,
     )
 
 

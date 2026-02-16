@@ -1,5 +1,3 @@
-"""Dataset loading utilities."""
-
 import gzip
 import pickle
 import struct
@@ -31,7 +29,6 @@ CIFAR10_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
 
 
 def _download_file(url: str, filepath: Path) -> None:
-    """Download a file if it doesn't exist."""
     if filepath.exists():
         return
     filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +37,6 @@ def _download_file(url: str, filepath: Path) -> None:
 
 
 def _read_mnist_images(filepath: Path) -> np.ndarray:
-    """Read MNIST image file."""
     with gzip.open(filepath, "rb") as f:
         magic, num, rows, cols = struct.unpack(">IIII", f.read(16))
         images = np.frombuffer(f.read(), dtype=np.uint8)
@@ -49,7 +45,6 @@ def _read_mnist_images(filepath: Path) -> np.ndarray:
 
 
 def _read_mnist_labels(filepath: Path) -> np.ndarray:
-    """Read MNIST label file."""
     with gzip.open(filepath, "rb") as f:
         magic, num = struct.unpack(">II", f.read(8))
         labels = np.frombuffer(f.read(), dtype=np.uint8)
@@ -62,17 +57,6 @@ def _load_mnist_format(
     flatten: bool = False,
     normalize: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    """Load a dataset in MNIST idx format.
-
-    Args:
-        urls: Dictionary mapping names to download URLs
-        data_dir: Directory to store/load data
-        flatten: If True, flatten images to vectors
-        normalize: If True, normalize pixel values to [0, 1]
-
-    Returns:
-        ((train_images, train_labels), (test_images, test_labels))
-    """
     data_dir = Path(data_dir)
 
     for name, url in urls.items():
@@ -109,7 +93,6 @@ def get_mnist_data(
     flatten: bool = False,
     normalize: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    """Load MNIST dataset."""
     return _load_mnist_format(MNIST_URLS, data_dir, flatten, normalize)
 
 
@@ -118,7 +101,6 @@ def get_fashion_mnist_data(
     flatten: bool = False,
     normalize: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    """Load Fashion-MNIST dataset."""
     return _load_mnist_format(FASHION_MNIST_URLS, data_dir, flatten, normalize)
 
 
@@ -126,24 +108,6 @@ def get_cifar10_data(
     data_dir: str | Path = "./data/cifar10",
     normalize: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    """Load CIFAR-10 dataset (HARD difficulty).
-
-    CIFAR-10 contains 60,000 32x32 color images in 10 classes.
-    Much harder than MNIST due to color and more complex objects.
-
-    Difficulty: 4/5 - Requires deeper networks, data augmentation helps.
-
-    Classes: airplane, automobile, bird, cat, deer,
-             dog, frog, horse, ship, truck
-
-    Args:
-        data_dir: Directory to store/load data
-        normalize: If True, normalize pixel values to [0, 1]
-
-    Returns:
-        ((train_images, train_labels), (test_images, test_labels))
-        Images shape: (N, 3, 32, 32) - channels first format
-    """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -201,20 +165,6 @@ def get_synthetic_data(
     *,
     key: jax.Array,
 ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    """Generate synthetic classification dataset.
-
-    Creates clusters of points around class centers with Gaussian noise.
-
-    Args:
-        n_samples: Total number of samples
-        n_features: Number of features per sample
-        n_classes: Number of classes
-        noise: Standard deviation of Gaussian noise
-        key: JAX random key
-
-    Returns:
-        ((train_X, train_y), (test_X, test_y))
-    """
     keys = jax.random.split(key, 4)
 
     # Generate class centers
@@ -246,19 +196,6 @@ def get_regression_data(
     *,
     key: jax.Array,
 ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    """Generate synthetic regression dataset.
-
-    Creates data following y = X @ w + noise.
-
-    Args:
-        n_samples: Total number of samples
-        n_features: Number of features
-        noise: Standard deviation of noise
-        key: JAX random key
-
-    Returns:
-        ((train_X, train_y), (test_X, test_y))
-    """
     keys = jax.random.split(key, 4)
 
     # True weights
@@ -279,8 +216,6 @@ def get_regression_data(
 
 
 class DataLoader:
-    """Simple batched data loader."""
-
     def __init__(
         self,
         X: jax.Array,
@@ -290,15 +225,6 @@ class DataLoader:
         *,
         key: jax.Array | None = None,
     ):
-        """Initialize data loader.
-
-        Args:
-            X: Input features
-            y: Labels/targets
-            batch_size: Batch size
-            shuffle: Whether to shuffle each epoch
-            key: JAX random key (required if shuffle=True)
-        """
         self.X = X
         self.y = y
         self.batch_size = batch_size
@@ -307,11 +233,9 @@ class DataLoader:
         self.n_samples = X.shape[0]
 
     def __len__(self) -> int:
-        """Number of batches per epoch."""
         return (self.n_samples + self.batch_size - 1) // self.batch_size
 
     def __iter__(self) -> Iterator[tuple[jax.Array, jax.Array]]:
-        """Iterate over batches."""
         indices = jnp.arange(self.n_samples)
 
         if self.shuffle and self.key is not None:

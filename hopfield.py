@@ -1,9 +1,3 @@
-"""Hopfield network conversion utilities.
-
-This module provides functions to convert trained soft-attention HNL layers
-into binary Hopfield networks for inference.
-"""
-
 import jax
 import jax.numpy as jnp
 

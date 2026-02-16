@@ -1,5 +1,3 @@
-"""Training loop and utilities."""
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -15,8 +13,6 @@ from data import DataLoader
 
 @dataclass
 class TrainConfig:
-    """Training configuration."""
-
     learning_rate: float = 1e-3
     epochs: int = 10
     batch_size: int = 32
@@ -50,8 +46,6 @@ def compute_annealed_temperature(
 
 
 class Trainer:
-    """Generic trainer for Equinox models."""
-
     def __init__(
         self,
         model: eqx.Module,
@@ -59,14 +53,6 @@ class Trainer:
         config: TrainConfig | None = None,
         optimizer: optax.GradientTransformation | None = None,
     ):
-        """Initialize trainer.
-
-        Args:
-            model: Equinox model to train
-            loss_fn: Loss function (model, x, y) -> scalar
-            config: Training configuration
-            optimizer: Optax optimizer (default: Adam)
-        """
         self.config = config or TrainConfig()
         self.loss_fn = loss_fn
 
@@ -127,7 +113,6 @@ class Trainer:
         key: jax.Array,
         temperature: float | None = None,
     ) -> tuple[eqx.Module, optax.OptState, jax.Array]:
-        """Single training step."""
         loss, grads = eqx.filter_value_and_grad(self.loss_fn)(
             model, x, y, key=key, temperature=temperature
         )
@@ -143,18 +128,12 @@ class Trainer:
         model: eqx.Module,
         x: jax.Array,
         y: jax.Array,
-        temperature: jax.Array = None,
-        hard=False,
+        temperature: float = 1.0,
+        hard: bool = False,
     ) -> tuple[jax.Array, jax.Array]:
-        """Evaluation step returning loss and accuracy (inference mode, no dropout).
-
-        Note: Uses model's default temperature (no annealing) for consistent evaluation.
-        """
         model = eqx.nn.inference_mode(model)
-        # Use a dummy key since inference_mode disables dropout
         dummy_key = jax.random.PRNGKey(0)
         keys = jax.random.split(dummy_key, x.shape[0])
-        # Use None for temperature to get consistent evaluation with model defaults
         logits = self._compute_logits(
             model, x, keys, hard=hard, temperature=temperature
         )
@@ -170,16 +149,6 @@ class Trainer:
         *,
         key: jax.Array,
     ) -> eqx.Module:
-        """Train the model.
-
-        Args:
-            train_data: (X_train, y_train) tuple
-            val_data: Optional (X_val, y_val) tuple
-            key: JAX random key
-
-        Returns:
-            Trained model
-        """
         X_train, y_train = train_data
         key, loader_key = jax.random.split(key)
         train_loader = DataLoader(
@@ -217,7 +186,7 @@ class Trainer:
                         )
                     )
                 else:
-                    temperature = None
+                    temperature = jnp.array(1.0)
 
                 key, step_key = jax.random.split(key)
                 self.model, self.opt_state, loss = self._train_step(
@@ -281,14 +250,6 @@ class Trainer:
     def evaluate(
         self, data: tuple[jax.Array, jax.Array], **kwargs
     ) -> tuple[float, float]:
-        """Evaluate model on data.
-
-        Args:
-            data: (X, y) tuple
-
-        Returns:
-            (loss, accuracy) tuple
-        """
         X, y = data
         loader = DataLoader(X, y, self.config.batch_size, shuffle=False)
 
@@ -305,25 +266,12 @@ class Trainer:
         return total_loss / n_batches, total_acc / n_batches
 
     def save_checkpoint(self, name: str) -> Path:
-        """Save model checkpoint.
-
-        Args:
-            name: Checkpoint name
-
-        Returns:
-            Path to saved checkpoint
-        """
         ckpt_path = self.checkpoint_dir / name
         eqx.tree_serialise_leaves(str(ckpt_path) + ".eqx", self.model)
         print(f"Saved checkpoint to {ckpt_path}.eqx")
         return ckpt_path
 
     def load_checkpoint(self, path: str | Path) -> None:
-        """Load model from checkpoint.
-
-        Args:
-            path: Path to checkpoint file
-        """
         self.model = eqx.tree_deserialise_leaves(str(path), self.model)
         print(f"Loaded checkpoint from {path}")
 
@@ -331,17 +279,6 @@ class Trainer:
 def cross_entropy_loss(
     model: eqx.Module, x: jax.Array, y: jax.Array, *, key: jax.Array
 ) -> jax.Array:
-    """Cross-entropy loss for classification.
-
-    Args:
-        model: Equinox model
-        x: Input batch (N, ...)
-        y: Label batch (N,)
-        key: Random key for dropout
-
-    Returns:
-        Mean cross-entropy loss
-    """
     keys = jax.random.split(key, x.shape[0])
     logits = jax.vmap(model)(x, key=keys)
     return optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
@@ -350,17 +287,6 @@ def cross_entropy_loss(
 def mse_loss(
     model: eqx.Module, x: jax.Array, y: jax.Array, *, key: jax.Array
 ) -> jax.Array:
-    """Mean squared error loss for regression.
-
-    Args:
-        model: Equinox model
-        x: Input batch (N, features)
-        y: Target batch (N,)
-        key: Random key for dropout
-
-    Returns:
-        Mean squared error
-    """
     keys = jax.random.split(key, x.shape[0])
     preds = jax.vmap(model)(x, key=keys).squeeze()
     return jnp.mean((preds - y) ** 2)
@@ -374,18 +300,6 @@ def hnm_cross_entropy_loss(
     key: jax.Array,
     temperature: float | None = None,
 ) -> jax.Array:
-    """Cross-entropy loss for HNM models with temperature support.
-
-    Args:
-        model: HNM model
-        x: Input batch (N, ...)
-        y: Label batch (N,)
-        key: Random key for dropout
-        temperature: Optional temperature override for annealing
-
-    Returns:
-        Mean cross-entropy loss
-    """
     keys = jax.random.split(key, x.shape[0])
     # HNM models take (x, key, hard, temperature)
     logits = jax.vmap(model, in_axes=(0, 0, None, None))(x, keys, False, temperature)
