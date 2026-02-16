@@ -1,7 +1,6 @@
 """Dataset loading utilities."""
 
 import gzip
-import hashlib
 import pickle
 import struct
 import tarfile
@@ -57,14 +56,16 @@ def _read_mnist_labels(filepath: Path) -> np.ndarray:
     return labels
 
 
-def get_mnist_data(
-    data_dir: str | Path = "./data/mnist",
+def _load_mnist_format(
+    urls: dict[str, str],
+    data_dir: str | Path,
     flatten: bool = False,
     normalize: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    """Load MNIST dataset.
+    """Load a dataset in MNIST idx format.
 
     Args:
+        urls: Dictionary mapping names to download URLs
         data_dir: Directory to store/load data
         flatten: If True, flatten images to vectors
         normalize: If True, normalize pixel values to [0, 1]
@@ -74,18 +75,15 @@ def get_mnist_data(
     """
     data_dir = Path(data_dir)
 
-    # Download files
-    for name, url in MNIST_URLS.items():
+    for name, url in urls.items():
         filepath = data_dir / Path(url).name
         _download_file(url, filepath)
 
-    # Load data
     train_images = _read_mnist_images(data_dir / "train-images-idx3-ubyte.gz")
     train_labels = _read_mnist_labels(data_dir / "train-labels-idx1-ubyte.gz")
     test_images = _read_mnist_images(data_dir / "t10k-images-idx3-ubyte.gz")
     test_labels = _read_mnist_labels(data_dir / "t10k-labels-idx1-ubyte.gz")
 
-    # Convert to float and normalize
     train_images = train_images.astype(np.float32)
     test_images = test_images.astype(np.float32)
 
@@ -97,7 +95,6 @@ def get_mnist_data(
         train_images = train_images.reshape(train_images.shape[0], -1)
         test_images = test_images.reshape(test_images.shape[0], -1)
     else:
-        # Add channel dimension for CNN: (N, H, W) -> (N, C, H, W)
         train_images = train_images[:, np.newaxis, :, :]
         test_images = test_images[:, np.newaxis, :, :]
 
@@ -105,6 +102,15 @@ def get_mnist_data(
         (jnp.array(train_images), jnp.array(train_labels)),
         (jnp.array(test_images), jnp.array(test_labels)),
     )
+
+
+def get_mnist_data(
+    data_dir: str | Path = "./data/mnist",
+    flatten: bool = False,
+    normalize: bool = True,
+) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
+    """Load MNIST dataset."""
+    return _load_mnist_format(MNIST_URLS, data_dir, flatten, normalize)
 
 
 def get_fashion_mnist_data(
@@ -112,57 +118,8 @@ def get_fashion_mnist_data(
     flatten: bool = False,
     normalize: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    """Load Fashion-MNIST dataset (MEDIUM difficulty).
-
-    Fashion-MNIST is a drop-in replacement for MNIST with clothing items
-    instead of digits. Same format (28x28 grayscale) but harder to classify.
-
-    Difficulty: 3/5 - More complex patterns than handwritten digits.
-
-    Classes: T-shirt/top, Trouser, Pullover, Dress, Coat,
-             Sandal, Shirt, Sneaker, Bag, Ankle boot
-
-    Args:
-        data_dir: Directory to store/load data
-        flatten: If True, flatten images to vectors
-        normalize: If True, normalize pixel values to [0, 1]
-
-    Returns:
-        ((train_images, train_labels), (test_images, test_labels))
-    """
-    data_dir = Path(data_dir)
-
-    # Download files
-    for name, url in FASHION_MNIST_URLS.items():
-        filepath = data_dir / Path(url).name
-        _download_file(url, filepath)
-
-    # Load data (same format as MNIST)
-    train_images = _read_mnist_images(data_dir / "train-images-idx3-ubyte.gz")
-    train_labels = _read_mnist_labels(data_dir / "train-labels-idx1-ubyte.gz")
-    test_images = _read_mnist_images(data_dir / "t10k-images-idx3-ubyte.gz")
-    test_labels = _read_mnist_labels(data_dir / "t10k-labels-idx1-ubyte.gz")
-
-    # Convert to float and normalize
-    train_images = train_images.astype(np.float32)
-    test_images = test_images.astype(np.float32)
-
-    if normalize:
-        train_images = train_images / 255.0
-        test_images = test_images / 255.0
-
-    if flatten:
-        train_images = train_images.reshape(train_images.shape[0], -1)
-        test_images = test_images.reshape(test_images.shape[0], -1)
-    else:
-        # Add channel dimension for CNN: (N, H, W) -> (N, C, H, W)
-        train_images = train_images[:, np.newaxis, :, :]
-        test_images = test_images[:, np.newaxis, :, :]
-
-    return (
-        (jnp.array(train_images), jnp.array(train_labels)),
-        (jnp.array(test_images), jnp.array(test_labels)),
-    )
+    """Load Fashion-MNIST dataset."""
+    return _load_mnist_format(FASHION_MNIST_URLS, data_dir, flatten, normalize)
 
 
 def get_cifar10_data(

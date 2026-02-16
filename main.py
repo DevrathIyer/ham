@@ -10,14 +10,12 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 from data import (DataLoader, get_cifar10_data, get_fashion_mnist_data,
-                  get_mnist_data, get_regression_data, get_synthetic_data)
+                  get_mnist_data)
 from hopfield import convert_hnm_to_hopfield
 from models import CNN, HNL, HNM, MLP, count_parameters
-from training import (TrainConfig, Trainer, cross_entropy_loss,
-                      hnm_cross_entropy_loss, mse_loss)
+from training import TrainConfig, Trainer, hnm_cross_entropy_loss, mse_loss
 from visualization import (plot_confusion_matrix, plot_hnm_mem_weights,
-                           plot_image_predictions, plot_synthetic_data_2d,
-                           plot_training_history)
+                           plot_image_predictions, plot_training_history)
 
 
 @dataclass
@@ -92,7 +90,7 @@ def load_dataset(
         (train_data, test_data, config)
     """
     config = DATASET_CONFIGS[dataset_name]
-    flatten = model_type not in ("cnn", "hcm") and config.is_image
+    flatten = model_type != "cnn" and config.is_image
 
     if dataset_name == "mnist":
         train_data, test_data = get_mnist_data(flatten=flatten)
@@ -140,11 +138,9 @@ def create_model(
     elif model_type == "hnm":
         layers = []
 
-        l1_key, l2_key, l3_key = jax.random.split(key, 3)
+        l1_key, l3_key = jax.random.split(key, 2)
         layers.append(HNL(784, 64, 8, 8, key=l1_key))
-        # layers.append(HNL(128, 128, 16, 16, key=l2_key))
         layers.append(HNL(64, 8, 10, 1, key=l3_key, is_class=True))
-        # layers.append(HNL(256, 64, 10, 1, key=l3_key, temp=temp))
 
         return HNM(layers)
 
@@ -207,9 +203,8 @@ def train(
         # Temperature annealing for HNM models:
         # Start with higher temperature for soft attention (better gradients)
         # End with lower temperature approaching hard attention
-        temp_start = 1e0  # Higher temperature = softer attention
-        # temp_end = 9.999e-1  # lower temperature = sharp attention
-        temp_end = 5e-3  # lower temperature = sharp attention
+        temp_start = 1e0
+        temp_end = 5e-3
     else:
         loss_fn = hnm_cross_entropy_loss
         temp_start = None
@@ -246,18 +241,17 @@ def train(
     print(f"\nFinal Test Accuracy (Hard Attention): {test_acc:.4f}")
 
     # Convert to Hopfield if requested
-    if convert_to_hopfield and model_type in ("hnm", "hcm"):
+    if convert_to_hopfield and model_type == "hnm":
         print("\n" + "=" * 60)
         print("Converting to Binary Hopfield Network")
         print("=" * 60)
 
-        if model_type == "hnm":
-            hopfield_model = convert_hnm_to_hopfield(
-                trained_model,
-                hopfield_key,
-                binary_dim=hopfield_binary_dim,
-                num_iterations=hopfield_iterations,
-            )
+        hopfield_model = convert_hnm_to_hopfield(
+            trained_model,
+            hopfield_key,
+            binary_dim=hopfield_binary_dim,
+            num_iterations=hopfield_iterations,
+        )
 
         print(f"Hopfield iterations: {hopfield_iterations}")
         print(f"Binary dimension: {hopfield_binary_dim or 'auto (num_memories)'}")
@@ -282,7 +276,7 @@ def train(
     )
 
     # Confusion matrix
-    if convert_to_hopfield and model_type in ("hnm", "hcm"):
+    if convert_to_hopfield and model_type == "hnm":
         # Hopfield models don't need dropout keys
         logits = jax.vmap(eval_model)(X_test)
     else:
@@ -424,7 +418,7 @@ Examples:
         "-m",
         type=str,
         default="cnn",
-        choices=["mlp", "hnm", "cnn", "hcm"],
+        choices=["mlp", "hnm", "cnn"],
         help="Model architecture",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -434,7 +428,7 @@ Examples:
     parser.add_argument(
         "--hopfield",
         action="store_true",
-        help="Convert to binary Hopfield network after training (HNM/HCM only)",
+        help="Convert to binary Hopfield network after training (HNM only)",
     )
     parser.add_argument(
         "--hopfield-iterations",
@@ -453,13 +447,13 @@ Examples:
 
     # Validate combinations
     config = DATASET_CONFIGS[args.dataset]
-    if args.model in ("cnn", "hcm") and not config.is_image:
+    if args.model == "cnn" and not config.is_image:
         parser.error(
             f"{args.model.upper()} requires image data. {config.name} is not an image dataset. Use --model mlp instead."
         )
 
-    if args.hopfield and args.model not in ("hnm", "hcm"):
-        parser.error("--hopfield only works with HNM and HCM models")
+    if args.hopfield and args.model != "hnm":
+        parser.error("--hopfield only works with HNM models")
 
     train(
         dataset=args.dataset,

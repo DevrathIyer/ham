@@ -5,7 +5,6 @@ from typing import Callable
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array
 
 
 class MLP(eqx.Module):
@@ -78,11 +77,11 @@ class HNL(eqx.Module):
         self.head_dim = out_feats // num_heads
         self.is_class = is_class
 
-        k1, k2, k3, k4, k5 = jax.random.split(key, 5)
+        k1, k2 = jax.random.split(key)
 
         self.query_proj = eqx.nn.Linear(in_feats, out_feats, use_bias=False, key=k1)
         self.memories = (
-            jax.random.normal(k3, (num_heads, num_mems, self.head_dim)) * 0.02
+            jax.random.normal(k2, (num_heads, num_mems, self.head_dim)) * 0.02
         )
         self.dropout = eqx.nn.Dropout(dropout_rate)
 
@@ -178,60 +177,6 @@ class CNN(eqx.Module):
         return cls(conv_layers, fc_layers)
 
 
-class ResidualBlock(eqx.Module):
-    """Residual block with skip connection."""
-
-    conv1: eqx.nn.Conv2d
-    conv2: eqx.nn.Conv2d
-    norm1: eqx.nn.BatchNorm
-    norm2: eqx.nn.BatchNorm
-    shortcut: eqx.nn.Conv2d | None
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        *,
-        key: jax.Array,
-    ):
-        keys = jax.random.split(key, 3)
-
-        self.conv1 = eqx.nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, padding=1, key=keys[0]
-        )
-        self.conv2 = eqx.nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, padding=1, key=keys[1]
-        )
-        self.norm1 = eqx.nn.BatchNorm(out_channels, axis_name="batch")
-        self.norm2 = eqx.nn.BatchNorm(out_channels, axis_name="batch")
-
-        if in_channels != out_channels:
-            self.shortcut = eqx.nn.Conv2d(
-                in_channels, out_channels, kernel_size=1, key=keys[2]
-            )
-        else:
-            self.shortcut = None
-
-    def __call__(
-        self, x: jax.Array, state: eqx.nn.State
-    ) -> tuple[jax.Array, eqx.nn.State]:
-        """Forward pass with residual connection."""
-        identity = x
-
-        out = self.conv1(x)
-        out, state = self.norm1(out, state)
-        out = jax.nn.relu(out)
-
-        out = self.conv2(out)
-        out, state = self.norm2(out, state)
-
-        if self.shortcut is not None:
-            identity = self.shortcut(identity)
-
-        out = jax.nn.relu(out + identity)
-        return out, state
-
-
 def count_parameters(model: eqx.Module) -> int:
     """Count total trainable parameters in a model."""
     params, _ = eqx.partition(model, eqx.is_array)
@@ -257,7 +202,6 @@ class HopfieldHNL(eqx.Module):
         q = q.reshape(self.num_heads, self.head_dim)
 
         q_norm = q / jnp.linalg.norm(q, axis=-1, keepdims=True)
-        # bq = jnp.sign(jnp.einsum("hd,hbd->hb", q_norm, self.bin_proj))
         z_dim = 64
         bin_scores = jnp.einsum("hbd,hd->hb", self.bin_proj, q_norm)
         _, indices = jax.lax.top_k(bin_scores, z_dim, axis=-1)
@@ -265,12 +209,6 @@ class HopfieldHNL(eqx.Module):
         bq = mask.at[jnp.arange(self.num_heads)[:, None], indices].set(1.0)
 
         attn_scores = jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.binary_dim
-        """jnp.cos(
-            jnp.pi
-            / 2
-            * (1 - (jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.binary_dim))
-        )
-        """
 
         if self.is_class:
             return attn_scores.flatten() * 10  # TODO: FIX?

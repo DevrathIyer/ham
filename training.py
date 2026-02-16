@@ -8,20 +8,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
-import orbax.checkpoint as ocp
 from tqdm import tqdm
 
 from data import DataLoader
-
-
-@dataclass
-class TrainState:
-    """Training state container."""
-
-    model: eqx.Module
-    opt_state: optax.OptState
-    step: int
-    epoch: int
 
 
 @dataclass
@@ -33,7 +22,6 @@ class TrainConfig:
     batch_size: int = 32
     checkpoint_dir: str = "./checkpoints"
     checkpoint_every: int = 5
-    log_every: int = 100
     # Temperature annealing parameters (both must be set to enable annealing)
     temp_start: float | None = (
         None  # Starting temperature (e.g., 0.1 for soft attention)
@@ -57,8 +45,6 @@ def compute_annealed_temperature(
 
     progress = step / total_steps
 
-    # return temp_end + (temp_start - temp_end) * 0.5 * (1 + jnp.cos(jnp.pi * progress))
-    # return jnp.array(temp_start + (temp_end - temp_start) * progress, dtype=jnp.float32)
     decay_rate = jnp.log(temp_end / temp_start)
     return temp_start * jnp.exp(decay_rate * progress)
 
@@ -120,11 +106,6 @@ class Trainer:
                 f"temp_start ({self.config.temp_start}) must be greater than "
                 f"temp_end ({self.config.temp_end}) for annealing to work."
             )
-
-        # Check if model supports temperature parameter (HNM models do)
-        from models import HNM
-
-        self.is_hnm = isinstance(model, HNM)
 
     def _compute_logits(
         self,
@@ -257,7 +238,6 @@ class Trainer:
                     hard=False,
                     temperature=temperature,
                 )
-                # jax.debug.print("{}, {}", logits[:5], y_batch[:5])
                 preds = jnp.argmax(logits, axis=-1)
                 acc = jnp.mean(preds == y_batch)
 

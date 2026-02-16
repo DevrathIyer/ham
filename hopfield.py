@@ -1,6 +1,6 @@
 """Hopfield network conversion utilities.
 
-This module provides functions to convert trained soft-attention HNL/HCL layers
+This module provides functions to convert trained soft-attention HNL layers
 into binary Hopfield networks for inference.
 """
 
@@ -48,7 +48,6 @@ def convert_hnl_to_hopfield(
     # Create binary projection for each head: (num_heads, binary_dim, head_dim)
     keys = jax.random.split(key, hnl.num_heads)
 
-    print(binary_dim)
     d = hnl.head_dim
     Ws = []
     for key in keys:
@@ -59,20 +58,8 @@ def convert_hnl_to_hopfield(
             blocks.append(Q)
         Ws.append(jnp.vstack(blocks)[:binary_dim, :])
 
-    """
-    bin_proj = [
-        jnp.linalg.qr(jax.random.normal(key, (binary_dim, hnl.head_dim)))[0]
-        for key in keys
-    ]
-
-    bin_inv = jnp.stack([proj.T for proj in bin_proj])
-    bin_proj = jnp.stack(bin_proj)
-    """
     bin_proj = jnp.asarray(Ws)
 
-    # Binarize memories and project to binary space
-    # memories: (num_heads, num_memories, head_dim)
-    # binary_memories = binarize_memories(hnl.memories)
     binary_memories = hnl.memories
 
     # Project each memory through bin_proj to get patterns in binary_dim space
@@ -86,25 +73,12 @@ def convert_hnl_to_hopfield(
         _, indices = jax.lax.top_k(bin_scores, z_dim, axis=-1)
         mask = jnp.zeros_like(bin_scores)
         mem_h_bits = mask.at[jnp.arange(mem_h.shape[0])[:, None], indices].set(1.0)
-        # mem_h_bits = jnp.take_along_axis(mask, indices, values=1.0, axis=-1)
 
         mem_h_bin = jnp.einsum("mk,kd->md", mem_h_bits, bin_proj_h)
-        mem_h_bin /= jnp.linalg.norm(mem_h_bin, axis=-1, keepdims=True)  # Re-normalize
-        jax.debug.print(
-            "Error: {}", jnp.mean(jnp.linalg.norm(mem_h - mem_h_bin, axis=-1), axis=-1)
-        )
+        mem_h_bin /= jnp.linalg.norm(mem_h_bin, axis=-1, keepdims=True)
         return mem_h_bits
 
     weight_matrix = jax.vmap(compute_weights_for_head)(bin_proj, binary_memories)
-    print(weight_matrix.shape)
-    print(f"Weight sparsity: {jnp.mean(weight_matrix)}")
-
-    memories = hnl.memories / jnp.linalg.norm(hnl.memories, axis=-1, keepdims=True)
-    """
-    mem_back = jnp.einsum("hmb,hdb->hmd", weight_matrix, bin_inv)
-    mem_back /= jnp.linalg.norm(mem_back, axis=-1, keepdims=True)
-    err = jnp.mean(jnp.linalg.norm(memories - mem_back, axis=-1))
-    """
 
     return HopfieldHNL(
         in_feats=hnl.in_feats,
