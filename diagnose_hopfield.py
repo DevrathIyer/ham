@@ -131,7 +131,7 @@ def compare_soft_vs_hopfield_retrieval(hnl: HNL, x: jax.Array, key: jax.Array):
     )
 
     # Hopfield retrieval
-    binary_dim = hnl.num_memories
+    binary_dim = hnl.num_mems
     bin_proj = create_binary_projection(key, hnl.head_dim, binary_dim)
     # Project and binarize memories
     projected_memories = memories_h @ bin_proj.T  # (num_memories, binary_dim)
@@ -223,7 +223,7 @@ def main():
     hnl = trained_hnm.layers[0]
     print(f"\nAnalyzing first HNL layer:")
     print(f"  in_features={hnl.in_features}, out_features={hnl.out_features}")
-    print(f"  num_memories={hnl.num_memories}, num_heads={hnl.num_heads}")
+    print(f"  num_memories={hnl.num_mems}, num_heads={hnl.num_heads}")
 
     x = X_test[0]  # Single sample
 
