@@ -1,10 +1,10 @@
 from pathlib import Path
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-import equinox as eqx
 
 
 def plot_training_history(
@@ -141,7 +141,11 @@ def plot_image_predictions(
         pred_name = class_names[pred_label] if class_names else str(pred_label)
 
         color = "green" if true_label == pred_label else "red"
-        ax.set_title(f"True: {true_name}\nPred: {pred_name} ({confidence:.1%})", color=color, fontsize=8)
+        ax.set_title(
+            f"True: {true_name}\nPred: {pred_name} ({confidence:.1%})",
+            color=color,
+            fontsize=8,
+        )
         ax.axis("off")
 
     # Hide unused subplots
@@ -189,7 +193,9 @@ def plot_synthetic_data_2d(
         ax.contourf(xx, yy, np.asarray(Z), alpha=0.3, cmap="viridis")
 
     # Plot data points
-    scatter = ax.scatter(X[:, 0], X[:, 1], c=y, cmap="viridis", edgecolors="black", alpha=0.7)
+    scatter = ax.scatter(
+        X[:, 0], X[:, 1], c=y, cmap="viridis", edgecolors="black", alpha=0.7
+    )
     plt.colorbar(scatter, ax=ax, label="Class")
 
     ax.set_xlabel("Feature 1")
@@ -253,6 +259,60 @@ def plot_hnm_mem_weights(
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Saved HNM mem weights plot to {save_path}")
+
+    return fig
+
+
+def plot_mem_correlations(
+    mem_correlations: list[dict[str, float]],
+    save_path: str | Path | None = None,
+    figsize: tuple[int, int] = (12, 5),
+) -> plt.Figure:
+    """Plot average pairwise memory cosine similarity per head over training epochs."""
+    if not mem_correlations:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.set_title("Memory Correlations (no data)")
+        return fig
+
+    # Collect all keys across snapshots
+    all_keys = sorted(mem_correlations[0].keys())
+    if not all_keys:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.set_title("Memory Correlations (no HNL layers)")
+        return fig
+
+    epochs = range(1, len(mem_correlations) + 1)
+
+    # Group keys by layer
+    layers = {}
+    for k in all_keys:
+        layer = k.split("_")[0]  # e.g. "L0"
+        layers.setdefault(layer, []).append(k)
+
+    n_layers = len(layers)
+    fig, axes = plt.subplots(
+        1, n_layers, figsize=(figsize[0], figsize[1]), squeeze=False
+    )
+
+    cmap = plt.cm.tab10
+    for col, (layer_name, keys) in enumerate(sorted(layers.items())):
+        ax = axes[0, col]
+        for i, k in enumerate(sorted(keys)):
+            values = [snap.get(k, 0.0) for snap in mem_correlations]
+            head_label = k.split("_")[1]  # e.g. "H0"
+            ax.plot(epochs, values, color=cmap(i), label=head_label, linewidth=1.5)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Avg Cosine Similarity")
+        ax.set_title(f"Layer {layer_name[1:]} Memory Correlation")
+        ax.legend(fontsize=8, ncol=2)
+        ax.grid(True, alpha=0.3)
+        # ax.set_ylim(-1, 1)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"Saved memory correlation plot to {save_path}")
 
     return fig
 

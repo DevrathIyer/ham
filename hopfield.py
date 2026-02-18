@@ -37,6 +37,7 @@ def convert_hnl_to_hopfield(
     hnl: HNL,
     key: jax.Array,
     binary_dim: int,
+    active_dims: int,
     num_iterations: int = 5,
 ) -> HopfieldHNL:
     # Create binary projection for each head: (num_heads, binary_dim, head_dim)
@@ -45,12 +46,17 @@ def convert_hnl_to_hopfield(
     d = hnl.head_dim
     Ws = []
     for key in keys:
+        """
         blocks = []
         for _ in range(int(jnp.ceil(binary_dim / d))):
             n_key, key = jax.random.split(key)
             Q, _ = jnp.linalg.qr(jax.random.normal(n_key, (d, d)))
             blocks.append(Q)
         Ws.append(jnp.vstack(blocks)[:binary_dim, :])
+        """
+        W = jax.random.normal(key, (binary_dim, d))
+        W /= jnp.linalg.norm(W, axis=-1, keepdims=True)
+        Ws.append(W)
 
     bin_proj = jnp.asarray(Ws)
 
@@ -59,12 +65,10 @@ def convert_hnl_to_hopfield(
     # Project each memory through bin_proj to get patterns in binary_dim space
     # For each head: (num_memories, head_dim) @ (binary_dim, head_dim).T -> (num_memories, binary_dim)
     # Then binarize the projected patterns
-    z_dim = 64
-
     def compute_weights_for_head(bin_proj_h, mem_h):
         mem_h = mem_h / jnp.linalg.norm(mem_h, axis=-1, keepdims=True)
         bin_scores = jnp.einsum("kd,md->mk", bin_proj_h, mem_h)
-        _, indices = jax.lax.top_k(bin_scores, z_dim, axis=-1)
+        _, indices = jax.lax.top_k(bin_scores, active_dims, axis=-1)
         mask = jnp.zeros_like(bin_scores)
         mem_h_bits = mask.at[jnp.arange(mem_h.shape[0])[:, None], indices].set(1.0)
 
@@ -83,6 +87,7 @@ def convert_hnl_to_hopfield(
         is_class=hnl.is_class,
         query_proj=hnl.query_proj,
         binary_dim=binary_dim,
+        active_dims=active_dims,
         num_iterations=num_iterations,
         bin_proj=bin_proj,
         weight_matrix=weight_matrix,
@@ -94,11 +99,12 @@ def convert_hnm_to_hopfield(
     hnm: HNM,
     key: jax.Array,
     binary_dim: int,
+    active_dims: int,
     num_iterations: int = 5,
 ) -> HopfieldHNM:
     keys = jax.random.split(key, len(hnm.layers))
     hopfield_layers = [
-        convert_hnl_to_hopfield(layer, k, binary_dim, num_iterations)
+        convert_hnl_to_hopfield(layer, k, binary_dim, active_dims, num_iterations)
         for layer, k in zip(hnm.layers, keys)
     ]
     return HopfieldHNM(*hopfield_layers)

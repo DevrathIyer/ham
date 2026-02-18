@@ -82,12 +82,73 @@ print(np.mean(((q_dists) / np.linalg.norm(X, axis=-1)) ** 2))
 """
 
 
-def compare_scaling(d_range=[8, 16, 32, 64], k_range=[1e4, 2e4, 1e5, 2e5, 1e6, 2e6]):
+def compare_active_d(
+    d=8, k_range=[1024, 2048, 4096, 8192], z_dims=[8, 16, 32, 64, 128, 256, 512]
+):
+    plt.figure(figsize=(10, 6))
+    # 1. Setup original data (Normalized)
+
+    x = np.random.randn(1000, d)
+    x /= np.linalg.norm(x, axis=-1, keepdims=True)
+
+    for k in k_range:
+        k = int(k)
+        bin_errors = []
+        for z_dim in z_dims:
+            # --- BINARY METHOD (SRP with Orthogonalization) ---
+            # Generate Blocked Orthogonal Matrix for better binary performance
+            blocks = []
+            for _ in range(int(np.ceil(k / d))):
+                Q, _ = np.linalg.qr(np.random.randn(d, d))
+                blocks.append(Q)
+            W_bin = np.vstack(blocks)[:k, :]
+
+            # z_dims = int(sparsity * k)
+            # Project to 0/1 codes
+            bits = np.einsum("kd,bd->bk", W_bin, x)
+            partition = np.argpartition(-bits, z_dim, axis=-1)
+            # partition = np.argpartition(-np.abs(bits), z_dim, axis=-1)
+            # bits = np.sign(bits)
+
+            bits[np.arange(bits.shape[0])[:, None], partition[:, :z_dim]] = 1
+            bits[np.arange(bits.shape[0])[:, None], partition[:, z_dim:]] = 0
+            bits = bits.astype(int)
+
+            # bits = (np.argpartition(np.einsum("kd,bd->bk", W_bin, x), axis=-1) >= sparsity).astype(int)
+
+            x_hat_bin = np.einsum("bk,kd->bd", bits, W_bin)
+            x_hat_bin /= np.linalg.norm(
+                x_hat_bin, axis=-1, keepdims=True
+            )  # Re-normalize
+            bin_errors.append(np.mean(np.linalg.norm(x - x_hat_bin, axis=-1), axis=-1))
+        print(bin_errors)
+        plt.plot(
+            z_dims,
+            bin_errors,
+            "s--",
+            label=f"k={k}",
+            # color="crimson",
+            linewidth=2,
+        )
+
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.xlabel("Active Dimensions")
+    plt.ylabel("L2 Reconstruction Error")
+    plt.title(
+        f"Scaling Comparison: Reconstruction Error vs. Active Dimenisons, varying continuous dimension (d={d})"
+    )
+    plt.legend()
+    plt.grid(True, which="both", ls="-", alpha=0.2)
+    plt.show()
+
+
+def compare_scaling(d_range=[128], k_range=[512, 1024, 2048, 4096, 8192]):
     plt.figure(figsize=(10, 6))
     for d in d_range:
         # 1. Setup original data (Normalized)
 
-        x = np.random.randn(200, d)
+        x = np.random.randn(100, d)
         x /= np.linalg.norm(x, axis=-1, keepdims=True)
 
         bin_errors = []
@@ -96,7 +157,8 @@ def compare_scaling(d_range=[8, 16, 32, 64], k_range=[1e4, 2e4, 1e5, 2e5, 1e6, 2
         z_dims = []
         for k in k_range:
             k = int(k)
-            z_dim = int(math.pow(k, 1 / 3))
+            z_dim = 256
+            # z_dim = int(math.pow(k, 1 / 3))
             z_dims.append(z_dim)
             # --- BINARY METHOD (SRP with Orthogonalization) ---
             # Generate Blocked Orthogonal Matrix for better binary performance
@@ -105,6 +167,10 @@ def compare_scaling(d_range=[8, 16, 32, 64], k_range=[1e4, 2e4, 1e5, 2e5, 1e6, 2
                 Q, _ = np.linalg.qr(np.random.randn(d, d))
                 blocks.append(Q)
             W_bin = np.vstack(blocks)[:k, :]
+            """
+            W_bin = np.random.randn(k, d)
+            W_bin /= np.linalg.norm(W_bin, axis=-1, keepdims=True)
+            """
 
             # z_dims = int(sparsity * k)
             # Project to 0/1 codes
@@ -157,3 +223,4 @@ def compare_scaling(d_range=[8, 16, 32, 64], k_range=[1e4, 2e4, 1e5, 2e5, 1e6, 2
 
 
 compare_scaling()
+# compare_active_d()

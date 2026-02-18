@@ -1,5 +1,6 @@
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import equinox as eqx
@@ -7,13 +8,13 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-from data import (DataLoader, get_cifar10_data, get_fashion_mnist_data,
-                  get_mnist_data)
+from data import get_cifar10_data, get_fashion_mnist_data, get_mnist_data
 from hopfield import convert_hnm_to_hopfield
 from models import CNN, HNL, HNM, MLP, count_parameters
-from training import TrainConfig, Trainer, hnm_cross_entropy_loss, mse_loss
+from training import TrainConfig, Trainer, make_hnm_loss
 from visualization import (plot_confusion_matrix, plot_hnm_mem_weights,
-                           plot_image_predictions, plot_training_history)
+                           plot_image_predictions, plot_mem_correlations,
+                           plot_training_history)
 
 
 @dataclass
@@ -23,7 +24,6 @@ class DatasetConfig:
     input_shape: tuple  # (C, H, W) for images or (features,) for tabular
     class_names: list[str] | None = None
     is_image: bool = True
-    is_regression: bool = False
 
 
 DATASET_CONFIGS = {
@@ -109,7 +109,7 @@ def create_model(
         else:
             in_feats = config.input_shape[0]
 
-        out_feats = config.num_classes if not config.is_regression else 1
+        out_feats = config.num_classes
 
         # Scale hidden layers based on input size
         if in_feats > 1000:
@@ -124,9 +124,10 @@ def create_model(
     elif model_type == "hnm":
         layers = []
 
-        l1_key, l3_key = jax.random.split(key, 2)
-        layers.append(HNL(784, 64, 8, 8, key=l1_key))
-        layers.append(HNL(64, 8, 10, 1, key=l3_key, is_class=True))
+        l1_key, l2_key, l3_key = jax.random.split(key, 3)
+        layers.append(HNL(784, 512, 16, 4, key=l1_key))
+        layers.append(HNL(512, 512, 16, 4, key=l2_key))
+        layers.append(HNL(512, 128, 10, 1, key=l3_key, is_class=True))
 
         return HNM(layers)
 
@@ -154,14 +155,13 @@ def train(
     epochs: int = 40,
     batch_size: int = 64,
     learning_rate: float = 1e-4,
-    convert_to_hopfield: bool = False,
-    hopfield_iterations: int = 5,
-    hopfield_binary_dim: int | None = None,
     temp_start: float | None = None,
     temp_end: float | None = None,
     temp_anneal_steps: int | None = None,
-    resume_checkpoint: str | None = None,
-) -> None:
+    layer_anneal: bool = False,
+    restore_checkpoint: str | None = None,
+    corr_penalty: float = 0.0,
+) -> tuple[Trainer, eqx.Module, tuple, str]:
     config = DATASET_CONFIGS[dataset]
 
     print("=" * 60)
@@ -169,104 +169,124 @@ def train(
     print("=" * 60)
 
     key = jax.random.PRNGKey(seed)
-    key, data_key, model_key, train_key, hopfield_key = jax.random.split(key, 5)
+    key, data_key, model_key, train_key = jax.random.split(key, 4)
 
     # Load data
     print(f"Loading {config.name} data...")
-    flatten = model_type == "mlp" and config.is_image
     (X_train, y_train), (X_test, y_test) = load_dataset(dataset, model_type, data_key)[
         :2
     ]
     print(f"Train: {X_train.shape}, Test: {X_test.shape}")
 
     # Create model
+    flatten = model_type == "mlp" and config.is_image
     model = create_model(model_type, config, model_key, flatten=flatten)
     print(f"Model parameters: {count_parameters(model):,}")
 
-    # Load checkpoint if resuming
-    if resume_checkpoint is not None:
-        model = eqx.tree_deserialise_leaves(resume_checkpoint, model)
-        print(f"Loaded checkpoint from {resume_checkpoint}")
+    # Resolve and load restore checkpoint
+    checkpoint_dir = f"./checkpoints/{dataset}_{model_type}"
+    if restore_checkpoint is not None:
+        stem = Path(restore_checkpoint).stem  # strip .eqx if provided
+        restore_path = f"{checkpoint_dir}/{stem}.eqx"
+        model = eqx.tree_deserialise_leaves(restore_path, model)
+        print(f"Loaded checkpoint from {restore_path}")
 
-    # Select loss function
-    loss_fn = mse_loss if config.is_regression else hnm_cross_entropy_loss
+    # Checkpoint naming: timestamp + annealed/base suffix
+    annealing = temp_start is not None and temp_end is not None
+    if annealing and restore_checkpoint is not None:
+        # Reuse the base model's timestamp: 20260216_143000_base -> 20260216_143000_annealed
+        checkpoint_name = Path(restore_checkpoint).stem.rsplit("_", 1)[0] + "_annealed"
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = "annealed" if annealing else "base"
+        checkpoint_name = f"{timestamp}_{suffix}"
 
-    # Training config
     train_config = TrainConfig(
         learning_rate=learning_rate,
         epochs=epochs,
         batch_size=batch_size,
-        checkpoint_dir=f"./checkpoints/{dataset}_{model_type}",
-        checkpoint_every=max(1, epochs // 5),
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_name=checkpoint_name,
         temp_start=temp_start,
         temp_end=temp_end,
         temp_anneal_steps=temp_anneal_steps,
+        layer_anneal=layer_anneal,
+        corr_penalty=corr_penalty,
     )
 
-    # Handle regression separately (custom training loop)
-    if config.is_regression:
-        _train_regression(
-            model, (X_train, y_train), (X_test, y_test), train_config, train_key
-        )
-        return
-
-    # Standard classification training
-    trainer = Trainer(model, loss_fn, train_config)
+    trainer = Trainer(model, make_hnm_loss(corr_penalty), train_config)
     trained_model = trainer.train((X_train, y_train), (X_test, y_test), key=train_key)
 
-    # Evaluate
-    test_loss, test_acc = trainer.evaluate((X_test, y_test), temperature=temp_end or 1.0)
+    test_loss, test_acc = trainer.evaluate((X_test, y_test))
     print(f"\nFinal Test Accuracy (Soft Attention): {test_acc:.4f}")
-
-    # Evaluate
     test_loss, test_acc = trainer.evaluate((X_test, y_test), hard=True)
     print(f"\nFinal Test Accuracy (Hard Attention): {test_acc:.4f}")
 
-    # Convert to Hopfield if requested
-    if convert_to_hopfield and model_type == "hnm":
-        print("\n" + "=" * 60)
-        print("Converting to Binary Hopfield Network")
-        print("=" * 60)
+    return trainer, trained_model, (X_test, y_test), checkpoint_name
 
-        hopfield_model = convert_hnm_to_hopfield(
-            trained_model,
-            hopfield_key,
-            binary_dim=hopfield_binary_dim,
-            num_iterations=hopfield_iterations,
-        )
 
-        print(f"Hopfield iterations: {hopfield_iterations}")
-        print(f"Binary dimension: {hopfield_binary_dim or 'auto (num_memories)'}")
+def run_hopfield(
+    model: eqx.Module,
+    X_test: jax.Array,
+    y_test: jax.Array,
+    key: jax.Array,
+    iterations: int,
+    binary_dim: int,
+    active_dims: int,
+) -> eqx.Module:
+    print("\n" + "=" * 60)
+    print("Converting to Binary Hopfield Network")
+    print("=" * 60)
 
-        # Evaluate Hopfield model
-        hopfield_logits = jax.vmap(hopfield_model)(X_test)
-        hopfield_preds = jnp.argmax(hopfield_logits, axis=-1)
-        hopfield_acc = jnp.mean(hopfield_preds == y_test)
-        print(f"\nFinal Test Accuracy (Binary Hopfield): {hopfield_acc:.4f}")
-
-        # Use Hopfield model for visualizations if converted
-        eval_model = hopfield_model
-    else:
-        eval_model = trained_model
-
-    # Visualizations
-    output_dir = Path(f"./outputs/{dataset}_{model_type}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    plot_training_history(
-        trainer.history, save_path=output_dir / "training_history.png"
+    hopfield_model = convert_hnm_to_hopfield(
+        model,
+        key,
+        binary_dim=binary_dim,
+        active_dims=active_dims,
+        num_iterations=iterations,
     )
 
-    # Confusion matrix
-    if convert_to_hopfield and model_type == "hnm":
-        # Hopfield models don't need dropout keys
+    print(f"Hopfield iterations: {iterations}")
+    print(f"Binary dimension: {binary_dim}")
+    print(f"Active dims: {active_dims}")
+
+    hopfield_logits = jax.vmap(hopfield_model)(X_test)
+    hopfield_preds = jnp.argmax(hopfield_logits, axis=-1)
+    hopfield_acc = jnp.mean(hopfield_preds == y_test)
+    print(f"\nFinal Test Accuracy (Binary Hopfield): {hopfield_acc:.4f}")
+
+    return hopfield_model
+
+
+def visualize(
+    trainer: Trainer,
+    eval_model: eqx.Module,
+    config: DatasetConfig,
+    dataset: str,
+    model_type: str,
+    checkpoint_name: str,
+    X_test: jax.Array,
+    y_test: jax.Array,
+    is_hopfield: bool = False,
+) -> None:
+    output_dir = Path(f"./outputs/{dataset}_{model_type}/{checkpoint_name}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if trainer.epoch > 0:
+        plot_training_history(
+            trainer.history, save_path=output_dir / "training_history.png"
+        )
+
+    if is_hopfield:
         logits = jax.vmap(eval_model)(X_test)
     else:
-        # Soft attention models need inference mode
         inference_model = eqx.nn.inference_mode(eval_model)
         dummy_key = jax.random.PRNGKey(0)
         test_keys = jax.random.split(dummy_key, X_test.shape[0])
-        logits = jax.vmap(inference_model)(X_test, key=test_keys)
+        logits = jax.vmap(inference_model, in_axes=(0, 0, None))(
+            X_test, test_keys, False
+        )
+
     preds = jnp.argmax(logits, axis=-1)
     plot_confusion_matrix(
         y_test,
@@ -275,10 +295,9 @@ def train(
         save_path=output_dir / "confusion_matrix.png",
     )
 
-    # Image predictions (for image datasets)
     if config.is_image and model_type == "cnn":
         plot_image_predictions(
-            trained_model,
+            eval_model,
             X_test,
             y_test,
             n_samples=16,
@@ -286,89 +305,11 @@ def train(
             save_path=output_dir / "predictions.png",
         )
 
-    # HNM mem weights visualization
-    if model_type == "hnm":
-        # Use image shape for image datasets to visualize as 2D images
-        image_shape = (
-            (config.input_shape[1], config.input_shape[2]) if config.is_image else None
+    if model_type == "hnm" and trainer.history.get("mem_correlations"):
+        plot_mem_correlations(
+            trainer.history["mem_correlations"],
+            save_path=output_dir / "mem_correlations.png",
         )
-        plot_hnm_mem_weights(
-            trained_model,
-            image_shape=image_shape,
-            save_path=output_dir / "hnm_mem_weights.png",
-        )
-
-    plt.close("all")
-    print(f"Saved visualizations to {output_dir}")
-
-
-def _train_regression(model, train_data, test_data, config, key):
-    from tqdm import tqdm
-
-    X_train, y_train = train_data
-    X_test, y_test = test_data
-
-    trainer = Trainer(model, mse_loss, config)
-    train_loader = DataLoader(
-        X_train, y_train, config.batch_size, shuffle=True, key=key
-    )
-
-    for epoch in range(config.epochs):
-        epoch_loss = 0.0
-        n_batches = 0
-
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config.epochs}")
-        for x_batch, y_batch in pbar:
-            trainer.model, trainer.opt_state, loss = trainer._train_step(
-                trainer.model, trainer.opt_state, x_batch, y_batch
-            )
-            epoch_loss += float(loss)
-            n_batches += 1
-            pbar.set_postfix({"mse": f"{loss:.4f}"})
-
-        avg_loss = epoch_loss / n_batches
-        trainer.history["train_loss"].append(avg_loss)
-
-        val_loss = mse_loss(trainer.model, X_test, y_test)
-        trainer.history["val_loss"].append(float(val_loss))
-
-        print(f"Epoch {epoch + 1}: train_mse={avg_loss:.4f}, val_mse={val_loss:.4f}")
-
-    final_mse = mse_loss(trainer.model, X_test, y_test)
-    print(f"\nFinal Test MSE: {final_mse:.4f}")
-
-    # Visualizations
-    output_dir = Path("./outputs/regression_mlp")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    epochs_range = range(1, len(trainer.history["train_loss"]) + 1)
-    ax.plot(epochs_range, trainer.history["train_loss"], "b-", label="Train MSE")
-    ax.plot(epochs_range, trainer.history["val_loss"], "r-", label="Val MSE")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("MSE")
-    ax.set_title("Regression Training")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.savefig(output_dir / "training_history.png", dpi=150, bbox_inches="tight")
-
-    inference_model = eqx.nn.inference_mode(trainer.model)
-    dummy_key = jax.random.PRNGKey(0)
-    test_keys = jax.random.split(dummy_key, X_test.shape[0])
-    preds = jax.vmap(inference_model)(X_test, key=test_keys).squeeze()
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.scatter(y_test, preds, alpha=0.5, edgecolors="black")
-    lims = [
-        min(float(y_test.min()), float(preds.min())),
-        max(float(y_test.max()), float(preds.max())),
-    ]
-    ax.plot(lims, lims, "r--", label="Perfect prediction")
-    ax.set_xlabel("Actual")
-    ax.set_ylabel("Predicted")
-    ax.set_title("Predictions vs Actual")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.savefig(output_dir / "predictions.png", dpi=150, bbox_inches="tight")
 
     plt.close("all")
     print(f"Saved visualizations to {output_dir}")
@@ -384,9 +325,12 @@ Examples:
   python main.py --dataset cifar10 --model cnn --epochs 20
   python main.py --dataset fashion_mnist --model cnn --lr 0.001
 
-  # Train HNM without annealing, then resume with annealing:
+  # Train HNM without annealing, then restore with annealing:
   python main.py -d mnist -m hnm --epochs 20
-  python main.py -d mnist -m hnm --epochs 20 --resume ./checkpoints/mnist_hnm/epoch_20.eqx --temp-start 1.0 --temp-end 0.005
+  python main.py -d mnist -m hnm --epochs 20 --restore 20260216_143000_base --temp-start 1.0 --temp-end 0.005
+
+  # Train without generating visualizations:
+  python main.py -d mnist -m hnm --no-visualize
         """,
     )
     parser.add_argument(
@@ -410,23 +354,6 @@ Examples:
     parser.add_argument("--batch-size", "-b", type=int, default=64, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument(
-        "--hopfield",
-        action="store_true",
-        help="Convert to binary Hopfield network after training (HNM only)",
-    )
-    parser.add_argument(
-        "--hopfield-iterations",
-        type=int,
-        default=100,
-        help="Number of Hopfield iterations (default: 5)",
-    )
-    parser.add_argument(
-        "--hopfield-binary-dim",
-        type=int,
-        default=512,
-        help="Binary dimension for Hopfield projection (default: num_memories)",
-    )
-    parser.add_argument(
         "--temp-start",
         type=float,
         default=None,
@@ -445,39 +372,105 @@ Examples:
         help="Number of steps to anneal over (default: all training steps)",
     )
     parser.add_argument(
-        "--resume",
+        "--layer-anneal",
+        action="store_true",
+        help="Anneal each non-class HNL layer sequentially, freezing each before moving to the next",
+    )
+    parser.add_argument(
+        "--restore",
         type=str,
         default=None,
-        help="Path to a .eqx checkpoint file to resume training from",
+        help="Checkpoint name to restore from (e.g. 20260216_143000_base); dataset and model are inferred from --dataset and --model",
+    )
+    parser.add_argument(
+        "--corr-penalty",
+        type=float,
+        default=0.0,
+        help="Weight for memory correlation penalty (default: 0.0 = off)",
+    )
+    parser.add_argument(
+        "--hopfield",
+        action="store_true",
+        help="Convert to binary Hopfield network after training (HNM only)",
+    )
+    parser.add_argument(
+        "--hopfield-iterations",
+        type=int,
+        default=100,
+        help="Number of Hopfield iterations",
+    )
+    parser.add_argument(
+        "-hb",
+        "--hopfield-binary-dim",
+        type=int,
+        default=512,
+        help="Binary dimension for Hopfield projection",
+    )
+    parser.add_argument(
+        "-ha",
+        "--hopfield-active-dims",
+        type=int,
+        default=512,
+        help="Number of active (top-k) dimensions used in binary attention",
+    )
+    parser.add_argument(
+        "--no-visualize",
+        action="store_true",
+        help="Skip generating visualizations after training",
     )
 
     args = parser.parse_args()
 
-    # Validate combinations
     config = DATASET_CONFIGS[args.dataset]
     if args.model == "cnn" and not config.is_image:
         parser.error(
             f"{args.model.upper()} requires image data. {config.name} is not an image dataset. Use --model mlp instead."
         )
-
     if args.hopfield and args.model != "hnm":
         parser.error("--hopfield only works with HNM models")
 
-    train(
+    trainer, trained_model, (X_test, y_test), checkpoint_name = train(
         dataset=args.dataset,
         model_type=args.model,
         seed=args.seed,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
-        convert_to_hopfield=args.hopfield,
-        hopfield_iterations=args.hopfield_iterations,
-        hopfield_binary_dim=args.hopfield_binary_dim,
         temp_start=args.temp_start,
         temp_end=args.temp_end,
         temp_anneal_steps=args.temp_anneal_steps,
-        resume_checkpoint=args.resume,
+        layer_anneal=args.layer_anneal,
+        restore_checkpoint=args.restore,
+        corr_penalty=args.corr_penalty,
     )
+
+    eval_model = trained_model
+    is_hopfield = False
+    if args.hopfield:
+        hopfield_key = jax.random.PRNGKey(args.seed + 1)
+        eval_model = run_hopfield(
+            trained_model,
+            X_test,
+            y_test,
+            hopfield_key,
+            args.hopfield_iterations,
+            args.hopfield_binary_dim,
+            args.hopfield_active_dims,
+        )
+        is_hopfield = True
+
+    if not args.no_visualize:
+        visualize(
+            trainer,
+            eval_model,
+            config,
+            args.dataset,
+            args.model,
+            checkpoint_name,
+            X_test,
+            y_test,
+            is_hopfield=is_hopfield,
+        )
 
 
 if __name__ == "__main__":

@@ -189,32 +189,6 @@ def get_synthetic_data(
     return (train_X, train_y), (test_X, test_y)
 
 
-def get_regression_data(
-    n_samples: int = 1000,
-    n_features: int = 10,
-    noise: float = 0.1,
-    *,
-    key: jax.Array,
-) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-    keys = jax.random.split(key, 4)
-
-    # True weights
-    w = jax.random.normal(keys[0], (n_features,))
-
-    # Generate X
-    X = jax.random.normal(keys[1], (n_samples, n_features))
-
-    # Generate y with noise
-    y = X @ w + jax.random.normal(keys[2], (n_samples,)) * noise
-
-    # Shuffle and split
-    perm = jax.random.permutation(keys[3], n_samples)
-    X, y = X[perm], y[perm]
-
-    split_idx = int(0.8 * n_samples)
-    return (X[:split_idx], y[:split_idx]), (X[split_idx:], y[split_idx:])
-
-
 class DataLoader:
     def __init__(
         self,
