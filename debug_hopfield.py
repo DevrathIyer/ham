@@ -32,6 +32,7 @@ from models import HNL, HNM, HopfieldHNL, HopfieldHNM
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 CHECKPOINT = "./checkpoints/fashion_mnist_hnm/20260218_105707_annealed.eqx"
+# "20260218_142617_annealed.eqx"
 ACTIVE_DIMS = 256
 BINARY_DIMS = [256, 512, 1024, 2048, 4096, 8192, 16384]
 N_SEEDS = 5

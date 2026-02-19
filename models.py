@@ -106,9 +106,12 @@ class HNL(eqx.Module):
         else:
             if hard:
                 top_mems = jnp.argmax(attn_scores, axis=-1)
-                mem_probs = jax.nn.one_hot(top_mems, num_classes=self.num_mems, axis=-1)
+                mem_probs = jax.nn.one_hot(
+                    top_mems, num_classes=self.num_mems, axis=-1
+                ) * jnp.max(attn_scores, axis=-1, keepdims=True)
             else:
                 mem_probs = jax.nn.softmax(attn_scores / self.temperature, axis=-1)
+                mem_probs *= attn_scores
         out = jnp.einsum("hm,hmd->hd", mem_probs, mem_norm) * jnp.sqrt(self.head_dim)
         out = out.reshape(self.out_feats)
         return out
@@ -231,7 +234,9 @@ class HopfieldHNL(eqx.Module):
         # giving scores in [0, 1] regardless of binary_dim.
         # Normalizing by binary_dim instead would shrink logits as binary_dim grows,
         # collapsing the class-layer softmax toward uniform and increasing error.
-        attn_scores = jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.active_dims
+        attn_scores = (
+            jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.active_dims
+        )
 
         if self.is_class:
             return attn_scores.flatten() * 10
@@ -243,6 +248,7 @@ class HopfieldHNL(eqx.Module):
         out = jnp.einsum("hb,hbd->hd", out, self.bin_proj)
 
         out *= jnp.sqrt(self.head_dim) / jnp.linalg.norm(out, axis=-1, keepdims=True)
+        out *= jnp.max(attn_scores, axis=-1, keepdims=True)
         out = out.reshape(self.out_feats)
         return out
 
