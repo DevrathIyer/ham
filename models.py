@@ -106,12 +106,9 @@ class HNL(eqx.Module):
         else:
             if hard:
                 top_mems = jnp.argmax(attn_scores, axis=-1)
-                mem_probs = jax.nn.one_hot(
-                    top_mems, num_classes=self.num_mems, axis=-1
-                ) * jnp.max(attn_scores, axis=-1, keepdims=True)
+                mem_probs = jax.nn.one_hot(top_mems, num_classes=self.num_mems, axis=-1)
             else:
                 mem_probs = jax.nn.softmax(attn_scores / self.temperature, axis=-1)
-                mem_probs *= attn_scores
         out = jnp.einsum("hm,hmd->hd", mem_probs, mem_norm) * jnp.sqrt(self.head_dim)
         out = out.reshape(self.out_feats)
         return out
@@ -238,17 +235,28 @@ class HopfieldHNL(eqx.Module):
             jnp.einsum("hb,hmb->hm", bq, self.weight_matrix) / self.active_dims
         )
 
+        attn_scores = 2 * attn_scores / (1 + attn_scores)
+
+        # attn_scores /= jnp.sum(jnp.maximum(bq[:, None], self.weight_matrix), axis=-1)
+        # attn_scores = jnp.sin(attn_scores * jnp.pi / 2)
+        # attn_scores = 1 - jnp.arccos(attn_scores) / jnp.pi
+
         if self.is_class:
             return attn_scores.flatten() * 10
+        # top_mems = jnp.argmax(attn_scores, axis=-1)
+        # mem_probs = jax.nn.one_hot(top_mems, num_classes=self.num_mems, axis=-1)
 
-        top_mems = jnp.argmax(attn_scores, axis=-1)
-        mem_probs = jax.nn.one_hot(top_mems, num_classes=self.num_mems, axis=-1)
+        mem_probs = jax.nn.softmax((attn_scores * 10), axis=-1)
 
-        out = jnp.einsum("hm,hmb->hb", mem_probs, self.weight_matrix)
-        out = jnp.einsum("hb,hbd->hd", out, self.bin_proj)
+        # out = jnp.einsum("hm,hmb->hb", mem_probs, self.weight_matrix)
+        # out = jnp.einsum("hb,hbd->hd", out, self.bin_proj)
 
-        out *= jnp.sqrt(self.head_dim) / jnp.linalg.norm(out, axis=-1, keepdims=True)
-        out *= jnp.max(attn_scores, axis=-1, keepdims=True)
+        mem_norm = self.memories / jnp.linalg.norm(
+            self.memories, axis=-1, keepdims=True
+        )
+        out = jnp.einsum("hm,hmd->hd", mem_probs, mem_norm) * jnp.sqrt(self.head_dim)
+        # out *= jnp.sqrt(self.head_dim) / jnp.linalg.norm(out, axis=-1, keepdims=True)
+
         out = out.reshape(self.out_feats)
         return out
 

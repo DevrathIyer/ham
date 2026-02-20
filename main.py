@@ -1,5 +1,5 @@
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -18,12 +18,24 @@ from visualization import (plot_confusion_matrix, plot_hnm_mem_weights,
 
 
 @dataclass
+class HNLConfig:
+    in_feats: int
+    out_feats: int
+    num_mems: int
+    num_heads: int
+    is_class: bool = False
+    dropout_rate: float = 0.0
+
+
+@dataclass
 class DatasetConfig:
     name: str
     num_classes: int
     input_shape: tuple  # (C, H, W) for images or (features,) for tabular
     class_names: list[str] | None = None
     is_image: bool = True
+    mlp_hidden_dims: list[int] = field(default_factory=lambda: [1024, 1024])
+    hnm_layers: list[HNLConfig] = field(default_factory=list)
 
 
 DATASET_CONFIGS = {
@@ -32,6 +44,11 @@ DATASET_CONFIGS = {
         num_classes=10,
         input_shape=(1, 28, 28),
         class_names=[str(i) for i in range(10)],
+        mlp_hidden_dims=[1024, 1024],
+        hnm_layers=[
+            HNLConfig(784, 512, 4, 4),
+            HNLConfig(512, 128, 10, 1, is_class=True),
+        ],
     ),
     "fashion_mnist": DatasetConfig(
         name="Fashion-MNIST",
@@ -49,6 +66,11 @@ DATASET_CONFIGS = {
             "Bag",
             "Ankle boot",
         ],
+        mlp_hidden_dims=[1024, 1024],
+        hnm_layers=[
+            HNLConfig(784, 1024, 32, 4),
+            HNLConfig(1024, 32, 10, 1, is_class=True),
+        ],
     ),
     "cifar10": DatasetConfig(
         name="CIFAR-10",
@@ -65,6 +87,12 @@ DATASET_CONFIGS = {
             "horse",
             "ship",
             "truck",
+        ],
+        mlp_hidden_dims=[256, 128],
+        hnm_layers=[
+            HNLConfig(3072, 256, 32, 4),
+            HNLConfig(256, 128, 32, 4),
+            HNLConfig(128, 32, 10, 1, is_class=True),
         ],
     ),
 }
@@ -109,26 +137,25 @@ def create_model(
         else:
             in_feats = config.input_shape[0]
 
-        out_feats = config.num_classes
-
-        # Scale hidden layers based on input size
-        if in_feats > 1000:
-            hidden_dims = [256, 128]
-        elif in_feats > 100:
-            hidden_dims = [64, 8]
-        else:
-            hidden_dims = [32, 16]
-
-        return MLP.create(in_feats, hidden_dims, out_feats, key=key)
+        return MLP.create(in_feats, config.mlp_hidden_dims, config.num_classes, key=key)
 
     elif model_type == "hnm":
-        layers = []
+        if not config.hnm_layers:
+            raise ValueError(f"No HNM architecture defined for dataset '{config.name}'")
 
-        l1_key, l2_key, l3_key = jax.random.split(key, 3)
-        layers.append(HNL(784, 512, 16, 4, key=l1_key))
-        layers.append(HNL(512, 512, 16, 4, key=l2_key))
-        layers.append(HNL(512, 128, 10, 1, key=l3_key, is_class=True))
-
+        keys = jax.random.split(key, len(config.hnm_layers))
+        layers = [
+            HNL(
+                cfg.in_feats,
+                cfg.out_feats,
+                cfg.num_mems,
+                cfg.num_heads,
+                is_class=cfg.is_class,
+                dropout_rate=cfg.dropout_rate,
+                key=k,
+            )
+            for cfg, k in zip(config.hnm_layers, keys)
+        ]
         return HNM(layers)
 
     elif model_type == "cnn":
@@ -161,6 +188,7 @@ def train(
     layer_anneal: bool = False,
     restore_checkpoint: str | None = None,
     corr_penalty: float = 0.0,
+    util_penalty: float = 0.0,
 ) -> tuple[Trainer, eqx.Module, tuple, str]:
     config = DATASET_CONFIGS[dataset]
 
@@ -212,9 +240,10 @@ def train(
         temp_anneal_steps=temp_anneal_steps,
         layer_anneal=layer_anneal,
         corr_penalty=corr_penalty,
+        util_penalty=util_penalty,
     )
 
-    trainer = Trainer(model, make_hnm_loss(corr_penalty), train_config)
+    trainer = Trainer(model, make_hnm_loss(corr_penalty, util_penalty), train_config)
     trained_model = trainer.train((X_train, y_train), (X_test, y_test), key=train_key)
 
     test_loss, test_acc = trainer.evaluate((X_test, y_test))
@@ -389,6 +418,12 @@ Examples:
         help="Weight for memory correlation penalty (default: 0.0 = off)",
     )
     parser.add_argument(
+        "--util-penalty",
+        type=float,
+        default=0.0,
+        help="Weight for memory utilization entropy bonus (default: 0.0 = off)",
+    )
+    parser.add_argument(
         "--hopfield",
         action="store_true",
         help="Convert to binary Hopfield network after training (HNM only)",
@@ -442,6 +477,7 @@ Examples:
         layer_anneal=args.layer_anneal,
         restore_checkpoint=args.restore,
         corr_penalty=args.corr_penalty,
+        util_penalty=args.util_penalty,
     )
 
     eval_model = trained_model

@@ -30,6 +30,7 @@ class TrainConfig:
     )
     layer_anneal: bool = False
     corr_penalty: float = 0.0
+    util_penalty: float = 0.0
 
 
 def compute_annealed_temperature(
@@ -462,8 +463,46 @@ def mem_correlation_penalty(model: eqx.Module) -> jax.Array:
     return total / count
 
 
-def make_hnm_loss(corr_penalty: float = 0.0):
-    """Return an HNM loss function, optionally with memory correlation penalty."""
+def mem_utilization_entropy(
+    model: eqx.Module, x: jax.Array, keys: jax.Array
+) -> jax.Array:
+    """
+    Mean entropy of the batch-averaged softmax attention distribution over memories,
+    across all retrieval (non-class) layer heads.
+
+    High entropy means memories are used uniformly across the batch.
+    The loss subtracts this term so minimising the loss maximises entropy.
+    """
+    total = jnp.array(0.0)
+    count = 0
+    x_cur = x
+
+    for layer in model.layers:
+        if layer.is_class:
+            break
+
+        mn = layer.memories / jnp.linalg.norm(layer.memories, axis=-1, keepdims=True)
+
+        def _fwd(xi, k):
+            q = layer.query_proj(xi).reshape(layer.num_heads, layer.head_dim)
+            q = q / jnp.linalg.norm(q, axis=-1, keepdims=True)
+            scores = jnp.einsum("hd,hmd->hm", q, mn)
+            probs = jax.nn.softmax(scores / layer.temperature, axis=-1)  # (H, M)
+            out = jnp.einsum("hm,hmd->hd", probs, mn) * jnp.sqrt(layer.head_dim)
+            return probs, out.reshape(layer.out_feats)
+
+        probs_batch, x_cur = jax.vmap(_fwd)(x_cur, keys)  # (B, H, M), (B, out_feats)
+
+        mean_probs = probs_batch.mean(axis=0)  # (H, M)
+        head_entropy = -jnp.sum(mean_probs * jnp.log(mean_probs + 1e-8), axis=-1)  # (H,)
+        total += head_entropy.mean()
+        count += 1
+
+    return total / count if count > 0 else total
+
+
+def make_hnm_loss(corr_penalty: float = 0.0, util_penalty: float = 0.0):
+    """Return an HNM loss function with optional memory correlation and utilization penalties."""
 
     def loss_fn(
         model: eqx.Module,
@@ -477,6 +516,8 @@ def make_hnm_loss(corr_penalty: float = 0.0):
         ce = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
         if corr_penalty > 0:
             ce = ce + corr_penalty * mem_correlation_penalty(model)
+        if util_penalty > 0:
+            ce = ce - util_penalty * mem_utilization_entropy(model, x, keys)
         return ce
 
     return loss_fn

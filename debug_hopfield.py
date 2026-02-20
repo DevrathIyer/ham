@@ -1,12 +1,11 @@
 """
 Diagnostic: sweep binary_dim (fixed active_dims), decompose error sources layer-by-layer.
 
-Three separate measurements per layer, each in *isolation* (given the original model's output
-from the previous layer as input), so errors don't compound from earlier layers:
+Per-layer measurements, each in *isolation* (given the original model's output from the
+previous layer as input), so errors don't compound from earlier layers:
 
-  Layer 0: retrieval acc given original input data
-  Layer 1: retrieval acc given original layer-0 output
-  Layer 2: classification acc given original layer-1 output
+  Retrieval layers: binary vs cosine retrieval agreement, given original layer input
+  Class layer: binary classification accuracy vs ground truth and vs cosine reference
 
 Runs N_SEEDS per binary_dim to separate systematic trends from random-projection variance.
 
@@ -31,10 +30,11 @@ from hopfield import convert_hnm_to_hopfield
 from models import HNL, HNM, HopfieldHNL, HopfieldHNM
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-CHECKPOINT = "./checkpoints/fashion_mnist_hnm/20260218_105707_annealed.eqx"
+# CHECKPOINT = "./checkpoints/mnist_hnm/20260219_145419_base.eqx"
+CHECKPOINT = "./checkpoints/mnist_hnm/20260219_160101_annealed.eqx"
 # "20260218_142617_annealed.eqx"
 ACTIVE_DIMS = 256
-BINARY_DIMS = [256, 512, 1024, 2048, 4096, 8192, 16384]
+BINARY_DIMS = [512, 1024, 2048, 4096, 8192, 16384]
 N_SEEDS = 5
 N_TEST = 2000
 BASE_SEED = 42
@@ -47,8 +47,7 @@ def make_base_model() -> HNM:
     l1, l2, l3 = jax.random.split(jax.random.PRNGKey(0), 3)
     return HNM(
         [
-            HNL(784, 512, 16, 4, key=l1),
-            HNL(512, 512, 16, 4, key=l2),
+            HNL(784, 512, 4, 4, key=l1),
             HNL(512, 128, 10, 1, key=l3, is_class=True),
         ]
     )
@@ -145,39 +144,41 @@ def run_seed(model, inf_model, X, y, orig_preds, bdim, key):
     acc = float(jnp.mean(preds == y))
     agreement = float(jnp.mean(preds == orig_preds))
 
-    # ── Isolated per-layer retrieval ──────────────────────────────────────────
-    # Layer 0: given original input X
-    ret0 = float(
-        jnp.mean(
-            _cosine_choices(model.layers[0], X) == _binary_choices(hop.layers[0], X)
-        )
-    )
+    # ── Build isolated inputs: each layer receives the original HNL hard-attn
+    #    output from the previous layer so errors don't cascade.
+    layer_inputs = [X]
+    for hnl in model.layers[:-1]:
+        layer_inputs.append(_hnl_hard_output(hnl, layer_inputs[-1]))
 
-    # Layer 1: given original layer-0 hard output (avoids layer-0 cascade)
-    X1_orig = _hnl_hard_output(
-        model.layers[0], X
-    )  # what the original model feeds layer 1
-    ret1 = float(
-        jnp.mean(
-            _cosine_choices(model.layers[1], X1_orig)
-            == _binary_choices(hop.layers[1], X1_orig)
-        )
-    )
+    # ── Retrieval accuracy for every non-class layer ──────────────────────────
+    ret = []
+    class_layer_idx = None
+    for i, (hnl, hl) in enumerate(zip(model.layers, hop.layers)):
+        if hnl.is_class:
+            class_layer_idx = i
+        else:
+            ret.append(
+                float(
+                    jnp.mean(
+                        _cosine_choices(hnl, layer_inputs[i])
+                        == _binary_choices(hl, layer_inputs[i])
+                    )
+                )
+            )
 
-    # Class layer: given original layer-1 hard output
-    X2_orig = _hnl_hard_output(model.layers[1], X1_orig)
+    # ── Class layer accuracy ──────────────────────────────────────────────────
+    X_cls = layer_inputs[class_layer_idx]
     class_acc_gt, class_acc_cos = _binary_class_acc(
-        hop.layers[2], model.layers[2], X2_orig, y
+        hop.layers[class_layer_idx], model.layers[class_layer_idx], X_cls, y
     )
 
-    # ── Reconstruction quality ────────────────────────────────────────────────
+    # ── Reconstruction quality (first retrieval layer) ────────────────────────
     recon = recon_cossim(model.layers[0], hop.layers[0], X)
 
     return dict(
         error=1 - acc,
         agreement=agreement,
-        ret0=ret0,
-        ret1=ret1,
+        ret=ret,
         class_acc_gt=class_acc_gt,
         class_acc_cos=class_acc_cos,
         recon=recon,
@@ -187,18 +188,15 @@ def run_seed(model, inf_model, X, y, orig_preds, bdim, key):
 def plot_memory_correlations(model: HNM, save_path: str) -> None:
     """
     Grid of pairwise cosine-similarity heatmaps: one cell per head per layer.
-
-    Layout  (nested GridSpec):
-      outer column 0  →  Layer 0  (16 heads  →  4×4 inner grid of 16×16 matrices)
-      outer column 1  →  Layer 1  (16 heads  →  4×4 inner grid of 16×16 matrices)
-      outer column 2  →  Layer 2  ( 1 head   →  1×1 inner grid of 10×10 matrix  )
-
-    Diagonal is NaN so it renders as grey, keeping the colour scale honest.
+    One outer column per layer; each column contains an inner grid of (M×M) matrices,
+    one per head.
     """
-    LAYER_NAMES = [
-        "Layer 0  (16 heads, 16 mems, dim 32)",
-        "Layer 1  (16 heads, 16 mems, dim 32)",
-        "Layer 2  class  (1 head, 10 mems, dim 32)",
+    n_layers = len(model.layers)
+    layer_names = [
+        f"Layer {i}  ({'class' if l.is_class else 'retrieval'})  "
+        f"({l.num_heads} head{'s' if l.num_heads > 1 else ''}, "
+        f"{l.num_mems} mems, dim {l.head_dim})"
+        for i, l in enumerate(model.layers)
     ]
 
     # ── Compute similarity matrices ──────────────────────────────────────────
@@ -214,10 +212,10 @@ def plot_memory_correlations(model: HNM, save_path: str) -> None:
         layer_sims.append(sims)
 
     # ── Figure layout ────────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(20, 8))
+    fig = plt.figure(figsize=(8 * n_layers, 8))
     outer_gs = gridspec.GridSpec(
         1,
-        3,
+        n_layers,
         figure=fig,
         wspace=0.10,
         left=0.03,
@@ -231,7 +229,7 @@ def plot_memory_correlations(model: HNM, save_path: str) -> None:
     vmin, vmax = -1.0, 1.0
 
     last_im = None
-    for li, (sims, name) in enumerate(zip(layer_sims, LAYER_NAMES)):
+    for li, (sims, name) in enumerate(zip(layer_sims, layer_names)):
         n_heads = len(sims)
         grid_cols = int(np.ceil(np.sqrt(n_heads)))  # 4 for 16 h, 1 for 1 h
         grid_rows = int(np.ceil(n_heads / grid_cols))
@@ -297,6 +295,137 @@ def plot_memory_correlations(model: HNM, save_path: str) -> None:
 SCATTER_PATH = "outputs/retrieval_scatter.png"
 SCATTER_BINARY_DIM = 512  # single bdim for the scatter plot
 N_SCATTER = 500  # number of test samples to plot
+
+ATTENTION_PATH = "outputs/attention_comparison.png"
+ATTENTION_BINARY_DIM = 512
+
+
+def _hnl_attn_probs(hnl: HNL, X: jax.Array) -> jax.Array:
+    """(N, H, M) – mem_probs matching HNL.__call__: softmax for retrieval, raw scores for class."""
+    mn = hnl.memories / jnp.linalg.norm(hnl.memories, axis=-1, keepdims=True)
+
+    def _single(x):
+        q = hnl.query_proj(x).reshape(hnl.num_heads, hnl.head_dim)
+        q = q / jnp.linalg.norm(q, axis=-1, keepdims=True)
+        scores = jnp.einsum("hd,hmd->hm", q, mn)
+        if hnl.is_class:
+            return scores * 10
+        return jax.nn.softmax(scores / hnl.temperature, axis=-1)
+
+    return jax.vmap(_single)(X)
+
+
+def _hopfield_attn_probs(hl: HopfieldHNL, X: jax.Array) -> jax.Array:
+    """(N, H, M) – mem_probs matching HopfieldHNL.__call__: softmax for retrieval, raw for class."""
+
+    def _single(x):
+        q = hl.query_proj(x).reshape(hl.num_heads, hl.head_dim)
+        q = q / jnp.linalg.norm(q, axis=-1, keepdims=True)
+        bs = jnp.einsum("hbd,hd->hb", hl.bin_proj, q)
+        _, idx = jax.lax.top_k(bs, hl.active_dims)
+        bq = jnp.zeros_like(bs).at[jnp.arange(hl.num_heads)[:, None], idx].set(1.0)
+        attn = jnp.einsum("hb,hmb->hm", bq, hl.weight_matrix)
+        if hl.is_class:
+            return attn
+        return jax.nn.softmax((attn * 2.5) / hl.active_dims, axis=-1)
+
+    return jax.vmap(_single)(X)
+
+
+def plot_attention_comparison(
+    model: HNM,
+    hop: HopfieldHNM,
+    X: jax.Array,
+    y: jax.Array,
+    save_path: str,
+) -> None:
+    """
+    Side-by-side average mem_prob heatmaps for each layer, comparing HNL vs Hopfield.
+
+    All layers (retrieval and class):
+      rows = true class, cols = memory index  (C × M heatmap)
+      Each row is the mean mem_probs for samples of that true class.
+
+    Retrieval layers: one subplot-row per head.
+    Class layer: one subplot-row (H=1, M=num_classes — a soft confusion matrix).
+
+    Inputs to each layer are isolated: the HNL hard-attn output from the
+    previous layer is used, so errors do not compound.
+    """
+    num_classes = int(y.max()) + 1
+
+    # Compute isolated inputs (original HNL hard-attn pipeline)
+    layer_inputs = [X]
+    for hnl in model.layers[:-1]:
+        layer_inputs.append(_hnl_hard_output(hnl, layer_inputs[-1]))
+
+    # Collect (N, H, M) mem_probs per layer from both models
+    hnl_probs_list, hop_probs_list = [], []
+    for hnl, hl, X_in in zip(model.layers, hop.layers, layer_inputs):
+        hnl_probs_list.append(np.array(_hnl_attn_probs(hnl, X_in)))
+        hop_probs_list.append(np.array(_hopfield_attn_probs(hl, X_in)))
+
+    y_np = np.array(y, dtype=int)
+
+    # Total subplot rows: one per head for retrieval layers, one for the class layer
+    n_rows = sum(hnl.num_heads if not hnl.is_class else 1 for hnl in model.layers)
+    fig, axes = plt.subplots(n_rows, 3, figsize=(15, 3.5 * n_rows))
+    if n_rows == 1:
+        axes = axes[None, :]
+
+    row = 0
+    for li, hnl in enumerate(model.layers):
+        hp = hnl_probs_list[li]  # (N, H, M)
+        hfp = hop_probs_list[li]  # (N, H, M)
+        layer_label = f"Layer {li}  ({'class' if hnl.is_class else 'retrieval'})"
+
+        n_heads = hnl.num_heads if not hnl.is_class else 1
+        for h in range(n_heads):
+            head_label = "" if hnl.is_class else f"  head {h}"
+            xlabel = "Memory index (= class)" if hnl.is_class else "Memory index"
+
+            hnl_mat = np.stack(
+                [hp[y_np == c, h, :].mean(axis=0) for c in range(num_classes)]
+            )  # (C, M)
+            hop_mat = np.stack(
+                [hfp[y_np == c, h, :].mean(axis=0) for c in range(num_classes)]
+            )
+            vmin = min(hnl_mat.min(), hop_mat.min())
+            vmax = max(hnl_mat.max(), hop_mat.max())
+            diff = hnl_mat - hop_mat
+
+            panels = [
+                (hnl_mat, "HNL (cosine)", "hot", vmin, vmax),
+                (hop_mat, "Hopfield (binary)", "hot", vmin, vmax),
+                (
+                    diff,
+                    "Difference  HNL − Hopfield",
+                    "RdBu_r",
+                    -np.abs(diff).max(),
+                    np.abs(diff).max(),
+                ),
+            ]
+            for col, (mat, title, cmap, lo, hi) in enumerate(panels):
+                ax = axes[row, col]
+                im = ax.imshow(mat, aspect="auto", cmap=cmap, vmin=lo, vmax=hi)
+                plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                ax.set_xlabel(xlabel)
+                ax.set_ylabel("True class")
+                ax.set_title(f"{layer_label}{head_label}\n{title}")
+                ax.set_xticks(range(hnl.num_mems))
+                ax.set_yticks(range(num_classes))
+            row += 1
+
+    fig.suptitle(
+        f"Average attention distributions: HNL vs Hopfield\n"
+        f"(binary_dim={hop.layers[0].binary_dim}, active_dims={ACTIVE_DIMS}, N={len(X)})",
+        fontsize=13,
+    )
+    plt.tight_layout()
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Attention comparison saved → {save_path}")
 
 
 def plot_retrieval_scatter(
@@ -476,12 +605,22 @@ def main():
         SCATTER_PATH,
     )
 
+    print(f"\nPlotting attention distributions (binary_dim={ATTENTION_BINARY_DIM}) …")
+    hop_attn = convert_hnm_to_hopfield(
+        inf_model,
+        jax.random.PRNGKey(BASE_SEED + 77),
+        binary_dim=ATTENTION_BINARY_DIM,
+        active_dims=ACTIVE_DIMS,
+    )
+    plot_attention_comparison(model, hop_attn, X_test, y_test, ATTENTION_PATH)
+
     dummy_keys = jax.random.split(jax.random.PRNGKey(0), N_TEST)
     orig_logits = jax.vmap(inf_model, in_axes=(0, 0, None))(X_test, dummy_keys, True)
     orig_preds = jnp.argmax(orig_logits, axis=-1)
     orig_acc = float(jnp.mean(orig_preds == y_test))
     print(f"\nOriginal HNM hard-attn acc = {orig_acc:.4f}  error = {1-orig_acc:.4f}\n")
 
+    n_ret = sum(1 for l in model.layers if not l.is_class)
     master_key = jax.random.PRNGKey(BASE_SEED)
     all_results = {}
 
@@ -494,10 +633,11 @@ def main():
             master_key, sk = jax.random.split(master_key)
             r = run_seed(model, inf_model, X_test, y_test, orig_preds, bdim, sk)
             all_results[bdim].append(r)
+            ret_str = "  ".join(f"ret{ri}={r['ret'][ri]:.3f}" for ri in range(n_ret))
             print(
                 f"  bdim={bdim:5d}  s={s}  "
                 f"err={r['error']:.3f}  "
-                f"ret0={r['ret0']:.3f}  ret1={r['ret1']:.3f}  "
+                f"{ret_str}  "
                 f"cls_acc={r['class_acc_gt']:.3f}  "
                 f"recon={r['recon']:.3f}"
             )
@@ -509,20 +649,28 @@ def main():
         vals = [[r[key] for r in all_results[d]] for d in bdims]
         return np.array([np.mean(v) for v in vals]), np.array([np.std(v) for v in vals])
 
+    def ms_ret(ri):
+        vals = [[r["ret"][ri] for r in all_results[d]] for d in bdims]
+        return np.array([np.mean(v) for v in vals]), np.array([np.std(v) for v in vals])
+
     err_m, err_s = ms("error")
-    agree_m, agree_s = ms("agreement")
-    ret0_m, ret0_s = ms("ret0")
-    ret1_m, ret1_s = ms("ret1")
     cls_m, cls_s = ms("class_acc_gt")
     clsc_m, clsc_s = ms("class_acc_cos")
     recon_m, recon_s = ms("recon")
+    ret_stats = [ms_ret(ri) for ri in range(n_ret)]
 
     # ── Plot ──────────────────────────────────────────────────────────────────
     xs = np.array(bdims, dtype=float)
-    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+    RET_COLORS = ["steelblue", "darkorange", "mediumpurple", "mediumseagreen"]
+
+    # Panels: error + one per retrieval layer + class_acc + recon + summary
+    n_panels = 1 + n_ret + 3
+    n_cols = (n_panels + 1) // 2
+    fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 9))
+    axes_flat = axes.flatten()
     fig.suptitle(
         f"Binary Hopfield: error sources vs binary_dim "
-        f"(active_dims={ACTIVE_DIMS}, fashion-MNIST, {N_SEEDS} seeds, N={N_TEST})",
+        f"(active_dims={ACTIVE_DIMS}, {N_SEEDS} seeds, N={N_TEST})",
         fontsize=12,
     )
 
@@ -530,8 +678,11 @@ def main():
         ax.plot(x, m, color=color, ls=ls, lw=2, marker="o", ms=5, label=label)
         ax.fill_between(x, m - s, m + s, color=color, alpha=0.15)
 
+    pi = 0  # panel index
+
     # 1. Overall error
-    ax = axes[0, 0]
+    ax = axes_flat[pi]
+    pi += 1
     band(ax, xs, err_m, err_s, "tomato", "Hopfield error")
     ax.axhline(
         1 - orig_acc,
@@ -548,30 +699,23 @@ def main():
     ax.grid(alpha=0.3)
     ax.set_ylim(bottom=0)
 
-    # 2. Layer-0 isolated retrieval
-    ax = axes[0, 1]
-    band(ax, xs, ret0_m, ret0_s, "steelblue", "L0 retrieval")
-    ax.axhline(1.0, color="gray", ls="--", alpha=0.5)
-    ax.set_xlabel("binary_dim")
-    ax.set_ylabel("Retrieval accuracy")
-    ax.set_title("Layer-0: Binary Retrieval Accuracy\n(given original input)")
-    ax.set_xscale("log", base=2)
-    ax.set_ylim([0, 1.05])
-    ax.grid(alpha=0.3)
+    # 2. Per-retrieval-layer accuracy
+    for ri, (ret_m, ret_s) in enumerate(ret_stats):
+        ax = axes_flat[pi]
+        pi += 1
+        color = RET_COLORS[ri % len(RET_COLORS)]
+        band(ax, xs, ret_m, ret_s, color, f"L{ri} retrieval")
+        ax.axhline(1.0, color="gray", ls="--", alpha=0.5)
+        ax.set_xlabel("binary_dim")
+        ax.set_ylabel("Retrieval accuracy")
+        ax.set_title(f"Layer-{ri}: Binary Retrieval Accuracy")
+        ax.set_xscale("log", base=2)
+        ax.set_ylim([0, 1.05])
+        ax.grid(alpha=0.3)
 
-    # 3. Layer-1 isolated retrieval
-    ax = axes[0, 2]
-    band(ax, xs, ret1_m, ret1_s, "darkorange", "L1 retrieval")
-    ax.axhline(1.0, color="gray", ls="--", alpha=0.5)
-    ax.set_xlabel("binary_dim")
-    ax.set_ylabel("Retrieval accuracy")
-    ax.set_title("Layer-1: Binary Retrieval Accuracy\n(given original layer-0 output)")
-    ax.set_xscale("log", base=2)
-    ax.set_ylim([0, 1.05])
-    ax.grid(alpha=0.3)
-
-    # 4. Class layer accuracy
-    ax = axes[1, 0]
+    # 3. Class layer accuracy
+    ax = axes_flat[pi]
+    pi += 1
     band(ax, xs, cls_m, cls_s, "mediumseagreen", "vs ground truth")
     band(ax, xs, clsc_m, clsc_s, "teal", "vs cosine-attn", ls="--")
     ax.axhline(
@@ -579,14 +723,15 @@ def main():
     )
     ax.set_xlabel("binary_dim")
     ax.set_ylabel("Accuracy")
-    ax.set_title("Class Layer Accuracy\n(given original layer-1 output)")
+    ax.set_title("Class Layer Accuracy")
     ax.set_xscale("log", base=2)
     ax.set_ylim([0, 1.05])
     ax.legend(fontsize=7)
     ax.grid(alpha=0.3)
 
-    # 5. Reconstruction quality
-    ax = axes[1, 1]
+    # 4. Reconstruction quality
+    ax = axes_flat[pi]
+    pi += 1
     band(ax, xs, recon_m, recon_s, "mediumpurple", "L0 recon cos-sim")
     ax.axhline(1.0, color="gray", ls="--", alpha=0.5)
     ax.set_xlabel("binary_dim")
@@ -596,23 +741,25 @@ def main():
     ax.set_ylim([0, 1.05])
     ax.grid(alpha=0.3)
 
-    # 6. All retrieval on same axes for comparison
-    ax = axes[1, 2]
-    band(ax, xs, ret0_m, ret0_s, "steelblue", "L0 retrieval")
-    band(ax, xs, ret1_m, ret1_s, "darkorange", "L1 retrieval")
+    # 5. Summary: all retrieval + class on one axes
+    ax = axes_flat[pi]
+    pi += 1
+    for ri, (ret_m, ret_s) in enumerate(ret_stats):
+        band(ax, xs, ret_m, ret_s, RET_COLORS[ri % len(RET_COLORS)], f"L{ri} retrieval")
     band(ax, xs, cls_m, cls_s, "mediumseagreen", "Class acc (vs GT)")
     ax.axhline(
         orig_acc, color="steelblue", ls=":", lw=1.5, label=f"Original ({orig_acc:.3f})"
     )
     ax.set_xlabel("binary_dim")
     ax.set_ylabel("Accuracy")
-    ax.set_title(
-        "All Layers: Retrieval / Classification Accuracy\n(isolated, given original inputs)"
-    )
+    ax.set_title("All Layers: Retrieval / Classification Accuracy\n(isolated inputs)")
     ax.set_xscale("log", base=2)
     ax.set_ylim([0, 1.05])
     ax.legend(fontsize=7)
     ax.grid(alpha=0.3)
+
+    for ax in axes_flat[pi:]:
+        ax.set_visible(False)
 
     plt.tight_layout()
     Path("outputs").mkdir(exist_ok=True)
@@ -621,36 +768,33 @@ def main():
     print(f"\nPlot saved → {OUTPUT_PATH}")
 
     # ── Summary table ─────────────────────────────────────────────────────────
+    ret_hdrs = "  ".join(f"{'ret-L'+str(ri):>13}" for ri in range(n_ret))
     print("\n── Isolated per-layer accuracy (mean ± std) ─────────────────────────────")
-    print(
-        f"{'bdim':>6}  {'error':>13}  {'ret-L0':>13}  {'ret-L1':>13}  {'cls-acc':>13}  {'recon':>13}"
-    )
+    print(f"{'bdim':>6}  {'error':>13}  {ret_hdrs}  {'cls-acc':>13}  {'recon':>13}")
+
+    def fmt(m, s):
+        return f"{m:.4f}±{s:.4f}"
+
     for i, d in enumerate(bdims):
-
-        def f(m, s):
-            return f"{m:.4f}±{s:.4f}"
-
+        ret_cols = "  ".join(
+            f"{fmt(ret_stats[ri][0][i], ret_stats[ri][1][i]):>13}"
+            for ri in range(n_ret)
+        )
         print(
-            f"{d:>6}  {f(err_m[i],err_s[i]):>13}  "
-            f"{f(ret0_m[i],ret0_s[i]):>13}  "
-            f"{f(ret1_m[i],ret1_s[i]):>13}  "
-            f"{f(cls_m[i],cls_s[i]):>13}  "
-            f"{f(recon_m[i],recon_s[i]):>13}"
+            f"{d:>6}  {fmt(err_m[i], err_s[i]):>13}  "
+            f"{ret_cols}  "
+            f"{fmt(cls_m[i], cls_s[i]):>13}  "
+            f"{fmt(recon_m[i], recon_s[i]):>13}"
         )
 
     print("\n── Diagnosis ────────────────────────────────────────────────────────────")
     print(f"  Original hard-attn acc/error : {orig_acc:.4f} / {1-orig_acc:.4f}")
-    print(f"  Layer-0 retrieval  @ max bdim: {ret0_m[-1]:.4f}")
-    print(f"  Layer-1 retrieval  @ max bdim: {ret1_m[-1]:.4f}")
+    for ri, (ret_m, ret_s) in enumerate(ret_stats):
+        print(f"  Layer-{ri} retrieval @ max bdim: {ret_m[-1]:.4f}")
+        print(f"  Δ ret-L{ri}  (min→max bdim): {ret_m[-1] - ret_m[0]:+.4f}")
     print(f"  Class-layer acc    @ max bdim: {cls_m[-1]:.4f}")
+    print(f"  Δ cls-acc (min→max bdim): {cls_m[-1] - cls_m[0]:+.4f}")
     print(f"  Reconstruction cos @ max bdim: {recon_m[-1]:.4f}")
-    # Find which layer changes most across bdim range
-    ret0_range = ret0_m[-1] - ret0_m[1]
-    ret1_range = ret1_m[-1] - ret1_m[1]
-    cls_range = cls_m[-1] - cls_m[1]
-    print(f"\n  Δ ret-L0  (min→max bdim): {ret0_range:+.4f}")
-    print(f"  Δ ret-L1  (min→max bdim): {ret1_range:+.4f}")
-    print(f"  Δ cls-acc (min→max bdim): {cls_range:+.4f}")
 
 
 if __name__ == "__main__":

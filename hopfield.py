@@ -47,16 +47,22 @@ def convert_hnl_to_hopfield(
     Ws = []
     for key in keys:
         """
-        blocks = []
-        for _ in range(int(jnp.ceil(binary_dim / d))):
-            n_key, key = jax.random.split(key)
-            Q, _ = jnp.linalg.qr(jax.random.normal(n_key, (d, d)))
-            blocks.append(Q)
-        Ws.append(jnp.vstack(blocks)[:binary_dim, :])
+        def generate_row(row_key):
+            # Pick w unique indices from D for each row
+            indices = jax.random.choice(row_key, d, shape=(active_dims,), replace=False)
+            row = jnp.zeros(d).at[indices].set(1.0)
+            return row
+
+        key, weight_key = jax.random.split(key)
+        row_keys = jax.random.split(key, binary_dim)
+        #Ws.append(jax.vmap(generate_row)(row_keys) * weights)
         """
-        W = jax.random.normal(key, (binary_dim, d))
-        W /= jnp.linalg.norm(W, axis=-1, keepdims=True)
-        Ws.append(W)
+        key, weight_key, row_key = jax.random.split(key, 3)
+        weights = jax.random.normal(weight_key, shape=(binary_dim, d))
+        rows = jax.random.bernoulli(
+            row_key, active_dims / binary_dim, shape=(binary_dim, d)
+        )
+        Ws.append(weights * rows)
 
     bin_proj = jnp.asarray(Ws)
 
@@ -68,12 +74,32 @@ def convert_hnl_to_hopfield(
     def compute_weights_for_head(bin_proj_h, mem_h):
         mem_h = mem_h / jnp.linalg.norm(mem_h, axis=-1, keepdims=True)
         bin_scores = jnp.einsum("kd,md->mk", bin_proj_h, mem_h)
-        _, indices = jax.lax.top_k(bin_scores, active_dims, axis=-1)
-        mask = jnp.zeros_like(bin_scores)
-        mem_h_bits = mask.at[jnp.arange(mem_h.shape[0])[:, None], indices].set(1.0)
+        vals, indices = jax.lax.top_k(bin_scores, active_dims, axis=-1)
 
+        mask = jnp.zeros_like(bin_scores)
+        mem_idx = jnp.arange(mem_h.shape[0])[:, None]
+        mem_h_bits = mask.at[mem_idx, indices].set(1.0)
+
+        true_sims = jnp.einsum("j,ij->i", mem_h[0], mem_h)
+        ham_sims = jnp.einsum("j,ij->i", mem_h_bits[0], mem_h_bits) / active_dims
+        jac_sims = (
+            ham_sims
+            * active_dims
+            / jnp.sum(jnp.maximum(mem_h_bits[0][None, :], mem_h_bits), axis=-1)
+        )
+        # jax.debug.print("True sims: {}", true_sims)
+        # jax.debug.print("Ham sims: {}", ham_sims)
+        # jax.debug.print("Jac sims: {}", jnp.sin(jac_sims * jnp.pi / 2))
+        """
         mem_h_bin = jnp.einsum("mk,kd->md", mem_h_bits, bin_proj_h)
-        mem_h_bin /= jnp.linalg.norm(mem_h_bin, axis=-1, keepdims=True)
+        norm = jnp.linalg.norm(mem_h_bin, axis=-1, keepdims=True)
+        mem_h_bin = jnp.where(norm > 0, mem_h_bin / norm, mem_h_bin)
+
+        jax.debug.print(
+            "Error: {}", jnp.mean(jnp.linalg.norm(mem_h_bin - mem_h, axis=-1), axis=-1)
+        )
+        """
+
         return mem_h_bits
 
     weight_matrix = jax.vmap(compute_weights_for_head)(bin_proj, binary_memories)
